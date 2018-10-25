@@ -1,24 +1,51 @@
 import logging
 from django.db import models
-from django.db.models.signals import pre_delete
+from django.db.models import F
+from django.db.models.signals import post_delete
 from django.dispatch import receiver
 from server.models import Delta, WfModule
-from .util import ChangesWfModuleOutputs, insert_wf_module, \
-        renumber_wf_modules
+from .util import ChangesWfModuleOutputs
+
 
 logger = logging.getLogger(__name__)
 
 
-# Deletion works by simply "orphaning" the wf_module, setting its workflow reference to null
 class DeleteModuleCommand(Delta, ChangesWfModuleOutputs):
-    # must not have cascade on WfModule because we may delete it first when we are deleted
-    wf_module = models.ForeignKey(WfModule, null=True, default=None, blank=True, on_delete=models.SET_DEFAULT)
+    """
+    Remove `wf_module` from its Workflow.
+
+    Our logic is to "soft-delete": set `wf_module.is_deleted=True`. Most facets
+    of Workbench's API should pretend a soft-deleted WfModule does not exist.
+    """
+
+    wf_module = models.ForeignKey(WfModule, on_delete=models.PROTECT)
+
     selected_wf_module = models.IntegerField(null=True, blank=True)
-    applied = models.BooleanField(default=True, null=False)             # is this command currently applied?
+
     dependent_wf_module_last_delta_ids = \
         ChangesWfModuleOutputs.dependent_wf_module_last_delta_ids
 
     def forward_impl(self):
+        self.wf_module.deleted = True
+        self.wf_module.save(update_fields=['deleted'])
+
+        # Decrement every other module's position, to fill the gap we made
+        self.workflow.wf_modules \
+                .filter(order__gt=self.wf_module.order) \
+                .update(order=F('order') - 1)
+
+        # Set new delta IDs on subsequent modules.
+        #
+        # self.wf_module's last_relevant_delta_it doesn't change: only
+        # _subsequent_ modules change.
+        try:
+            next_wf_module = self.workflow.wf_modules.get(
+                order=self.wf_module.order
+            )
+            self.forward_dependent_wf_module_versions(next_wf_module)
+        except WfModule.DoesNotExist:
+            self._changed_wf_module_versions = dict()
+
         # If we are deleting the selected module, then set the previous module
         # in stack as selected (behavior same as in workflow-reducer.js)
         selected = self.workflow.selected_wf_module
@@ -28,28 +55,35 @@ class DeleteModuleCommand(Delta, ChangesWfModuleOutputs):
                 self.workflow.selected_wf_module = selected
             else:
                 self.workflow.selected_wf_module = None
-            self.workflow.save()
-
-        self.forward_dependent_wf_module_versions(self.wf_module)
-        self.wf_module.workflow = None                                  # detach from workflow
-        self.wf_module.save()
-        renumber_wf_modules(self.workflow)                              # fix up ordering on the rest
-        self.applied = True
-        self.save()
+            self.workflow.save(update_fields=['selected_wf_module'])
 
     def backward_impl(self):
-        insert_wf_module(self.wf_module, self.workflow, self.wf_module.order)
-        self.wf_module.workflow = self.workflow                         # attach to workflow
-        self.backward_dependent_wf_module_versions(self.wf_module)
-        self.wf_module.save()
+        self.wf_module.deleted = False
+        self.wf_module.save(update_fields=['deleted'])
+
+        # Move subsequent modules over to make way for this one.
+        self.workflow.wf_modules \
+                .filter(order__ge=self.wf_module.order) \
+                .update(order=F('order') + 1)
+
+        # Set new delta IDs on subsequent modules.
+        #
+        # self.wf_module's last_relevant_delta_it doesn't change: only
+        # _subsequent_ modules change.
+        try:
+            next_wf_module = self.workflow.wf_modules.get(
+                order=self.wf_module.order + 1
+            )
+            self.forward_dependent_wf_module_versions(next_wf_module)
+        except WfModule.DoesNotExist:
+            self._changed_wf_module_versions = dict()
+
         # [adamhooper, 2018-06-19] I don't think there's any hope we can
         # actually restore selected_wf_module correctly, because sometimes we
         # update it without a command. But I think focusing the restored module
         # is something a user could expect.
         self.workflow.selected_wf_module = self.selected_wf_module
-        self.workflow.save()
-        self.applied = False
-        self.save()
+        self.workflow.save(update_fields=['selected_wf_module'])
 
     @classmethod
     def amend_create_kwargs(cls, *, workflow, wf_module):
@@ -60,7 +94,7 @@ class DeleteModuleCommand(Delta, ChangesWfModuleOutputs):
         # amend_create_kwargs() is called within workflow.cooperative_lock(),
         # so we can check without racint whether wf_module is already deleted.
         wf_module.refresh_from_db()
-        if not wf_module.workflow_id:
+        if wf_module.is_deleted:
             return None
 
         return {
@@ -80,15 +114,14 @@ class DeleteModuleCommand(Delta, ChangesWfModuleOutputs):
     def command_description(self):
         return f'Delete WfModule {self.wf_module}'
 
-# When we are deleted, delete the module if it's not in use by the Workflow (i.e. if we are currently applied)
-@receiver(pre_delete, sender=DeleteModuleCommand, dispatch_uid='deletemodulecommand')
+# When we are deleted, hard-delete the module if applicable
+@receiver(post_delete, sender=DeleteModuleCommand,
+          dispatch_uid='deletemodulecommand')
 def deletemodulecommand_delete_callback(sender, instance, **kwargs):
-    if instance.applied == True:
+    wf_module = instance.wf_module
+
+    if wf_module and wf_module.is_deleted:
         try:
-            # We've had cases where two DeleteModuleCommands pointed to the same wf, due to race conditions
-            # (now fixed via delete_lock). To prevent future similar fails, wrap the delete in a try
-            instance.wf_module.delete()
-        except Exception as e:
-            logger.exception("Error deleting wf_module for DeleteModuleCommand " + str(instance))
-
-
+            wf_module.delete()
+        except:
+            logger.exception('Error hard-deleting WfModule')

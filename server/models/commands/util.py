@@ -1,42 +1,6 @@
 from django.core.validators import int_list_validator
 from django.db import models
-from server.models import WfModule, Workflow
-
-
-# Give the new WfModule an 'order' of insert_before, and add 1 to all following WfModules
-def insert_wf_module(wf_module: WfModule, workflow: Workflow,
-                     insert_before: int) -> None:
-    if insert_before < 0:
-        insert_before = 0
-
-    # This algorithm is deliberately robust to non-standard ordering (not 0..n-1)
-    pos = 0
-    for wfm in WfModule.objects.filter(workflow=workflow):
-        if pos == insert_before:
-            pos += 1
-        if wfm.order != pos:
-            wfm.order = pos
-            wfm.save()
-        pos += 1
-
-    # normalize insert_before so it's always the index where the new WfModule ends up
-    if insert_before > pos:
-        insert_before = pos
-
-    # save new position if needed
-    if wf_module.order != insert_before:
-        wf_module.order = insert_before
-
-
-# Forces canonical values of 'order' field: 0..n-1
-# Used after deleting a WfModule
-def renumber_wf_modules(workflow: Workflow):
-    pos = 0
-    for wfm in WfModule.objects.filter(workflow=workflow):
-        if wfm.order != pos:
-            wfm.order = pos
-            wfm.save()
-        pos += 1
+from server.models import WfModule
 
 
 class ChangesWfModuleOutputs:
@@ -61,8 +25,8 @@ class ChangesWfModuleOutputs:
         """
         Write new last_relevant_delta_id to `wf_module` and its dependents.
 
-        You must call `wf_module.save()` after calling this method. Dependents
-        will be saved as a side-effect.
+        As a side-effect, this will save .last_relevant_delta_id on `wf_module`
+        and its successors.
         """
         # Calculate "old" (pre-forward) last_revision_delta_ids, via DB query
         old_ids = [wf_module.last_relevant_delta_id] + list(
@@ -76,6 +40,7 @@ class ChangesWfModuleOutputs:
 
         # Overwrite them, for this one and previous ones
         wf_module.last_relevant_delta_id = self.id
+        wf_module.save(update_fields=['last_relevant_delta_id'])
         wf_module.dependent_wf_modules() \
             .update(last_relevant_delta_id=self.id)
 

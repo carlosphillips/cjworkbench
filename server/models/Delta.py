@@ -168,7 +168,7 @@ class Delta(PolymorphicModel):
 
         Example:
 
-            delta = await Delta.create_impl(ChangeWfModuleNotesCommand,
+            delta = await Delta.create_impl(
                 workflow=wf_module.workflow,
                 # ... other kwargs
             )

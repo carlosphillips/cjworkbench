@@ -14,26 +14,16 @@ from .ParameterVal import ParameterVal
 from .StoredObject import StoredObject
 
 
-# ---- Parameter Dictionary Sanitization ----
-
 class WfModule(models.Model):
     """An instance of a Module in a Workflow."""
     class Meta:
         ordering = ['order']
 
     def __str__(self):
-        if self.workflow is not None:
-            wfstr = ' - workflow: ' + self.workflow.__str__()
-        else:
-            wfstr = ' - deleted from workflow'
+        wfstr = ' - workflow: ' + self.workflow.__str__()
         return self.get_module_name() + ' - id: ' + str(self.id) + wfstr
 
-    # --- Fields ----
-    workflow = models.ForeignKey(
-        'Workflow',
-        related_name='wf_modules',
-        null=True,                     # null means this is a deleted WfModule
-        on_delete=models.CASCADE)      # delete WfModule if Workflow deleted
+    workflow = models.ForeignKey('Workflow', on_delete=models.CASCADE)
 
     module_version = models.ForeignKey(
         ModuleVersion,
@@ -104,6 +94,8 @@ class WfModule(models.Model):
     # to the WfModule, so we'd be left with a chicken-and-egg problem.
     last_relevant_delta_id = models.IntegerField(default=0, null=False)
 
+    is_deleted = models.BooleanField(default=False)
+
     # ---- Utilities ----
 
     # navigate through a stack
@@ -112,11 +104,13 @@ class WfModule(models.Model):
             return None
         else:
             return WfModule.objects.get(workflow=self.workflow,
-                                        order=self.order-1)
+                                        order=self.order-1,
+                                        deleted=False)
 
     def dependent_wf_modules(self) -> List['WfModule']:
         """QuerySet of all WfModules that come after this one, in order."""
-        return self.workflow.wf_modules.filter(order__gt=self.order)
+        return self.workflow.wf_modules.filter(is_deleted=False,
+                                               order__gt=self.order)
 
     def get_module_name(self):
         if self.module_version is not None:
