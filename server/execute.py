@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import datetime
 from typing import Any, Dict, Optional, Tuple
@@ -98,10 +99,12 @@ def _execute_wfmodule_pre(wf_module: WfModule) -> Tuple:
 
         old_result = None
         if cached_render_result:
-            # If the cache is good, skip everything.
+            # If the cache is good, skip everything. No need for old_result,
+            # because we know the output won't change (since we won't even run
+            # render()).
             if (cached_render_result.delta_id
                     == wf_module.last_relevant_delta_id):
-                return (cached_render_result, None, None, None, None)
+                return (cached_render_result, None, None, None, None, None)
 
             if safe_wf_module.notifications:
                 old_result = cached_render_result.result
@@ -116,7 +119,7 @@ def _execute_wfmodule_pre(wf_module: WfModule) -> Tuple:
 
 @database_sync_to_async
 def _execute_wfmodule_save(wf_module: WfModule, result: ProcessResult,
-                           old_result: ProcessResult, ) -> Tuple:
+                           old_result: ProcessResult) -> Tuple:
     """
     Second database step of execute_wfmodule().
 
@@ -142,7 +145,7 @@ def _execute_wfmodule_save(wf_module: WfModule, result: ProcessResult,
             result
         )
 
-        if result != old_result and safe_wf_module.notifications:
+        if safe_wf_module.notifications and result != old_result:
             safe_wf_module.has_unseen_notification = True
             output_delta = notifications.OutputDelta(safe_wf_module,
                                                      old_result, result)
@@ -196,8 +199,12 @@ async def execute_wfmodule(wf_module: WfModule,
         return cached_render_result
 
     table = last_result.dataframe
-    result = dispatch.module_dispatch_render(module_version, params,
-                                             table, fetch_result)
+    loop = asyncio.get_event_loop()
+    # Render may take a while. run_in_executor to push that slowdown to a
+    # thread and keep our event loop responsive.
+    result = await loop.run_in_executor(None, dispatch.module_dispatch_render,
+                                        module_version, params, table,
+                                        fetch_result)
 
     cached_render_result, output_delta = \
         await _execute_wfmodule_save(wf_module, result, old_result)
@@ -281,10 +288,10 @@ def _load_wf_modules_and_input(workflow: Workflow):
 
 async def execute_workflow(workflow: Workflow) -> Optional[CachedRenderResult]:
     """
-    Ensures all `workflow.wf_modules` have valid cached render results.
+    Ensure all `workflow.wf_modules` have valid cached render results.
 
-    raises UnneededExecution if the inputs become stale (at which point we
-    don't care about the results any more).
+    Raise UnneededExecution if the inputs become stale (at which point we don't
+    care about results any more).
 
     WEBSOCKET NOTES: each wf_module is executed in turn. After each execution,
     we notify clients of its new columns and status.
