@@ -38,12 +38,6 @@ class ParameterValTests(LoggedInTestCase, ParameterValTestHelpers):
         self._augment_request(request, user, session_key)
         return request
 
-    def _build_patch(self, *args, user: User=None, session_key: str='a-key',
-                     **kwargs):
-        request = self.factory.patch(*args, **kwargs)
-        self._augment_request(request, user, session_key)
-        return request
-
     # Workflow API must return correct values for parameters
     def test_parameterval_detail_get(self):
         # This test _actually_ tests Workflow.get. TODO move to test_workflow
@@ -110,21 +104,3 @@ class ParameterValTests(LoggedInTestCase, ParameterValTestHelpers):
         self.assertEqual(radio_val['parameter_spec']['id_name'], 'radioparam')
         self.assertEqual(radio_val['parameter_spec']['type'], ParameterSpec.RADIO)
         self.assertEqual(radio_val['value'], 0)
-
-    # test parameter change API
-    def test_parameterval_detail_patch(self):
-        old_rev  = self.workflow.revision()
-
-        request = self._build_patch('/api/parameters/%d/' % self.floatID,
-                                    {'value': '50.456' }, user=self.user)
-        response = parameterval_detail(request, pk=self.floatID)
-        self.assertIs(response.status_code, status.HTTP_204_NO_CONTENT)
-
-        # see that we get the new value back
-        response = self.client.get('/api/parameters/%d/' % self.floatID)
-        self.assertIs(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['value'], 50.456)
-
-        # changing a parameter should change the version
-        self.workflow.refresh_from_db()
-        self.assertNotEqual(old_rev, self.workflow.revision())

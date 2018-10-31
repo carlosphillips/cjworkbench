@@ -38,10 +38,11 @@ def locked_wf_module(wf_module):
         # safe_wf_module: locked at the database level.
         delta_id = wf_module.last_relevant_delta_id
         try:
-            safe_wf_module = WfModule.objects \
-                .filter(workflow_id=wf_module.workflow_id) \
-                .filter(last_relevant_delta_id=delta_id) \
-                .get(pk=wf_module.pk)
+            safe_wf_module = WfModule.objects.get(
+                pk=wf_module.pk,
+                is_deleted=False,
+                last_relevant_delta_id=delta_id
+            )
         except WfModule.DoesNotExist:
             # Module was deleted or changed input/params _after_ we requested
             # render but _before_ we start rendering
@@ -255,7 +256,7 @@ def _load_wf_modules_and_input(workflow: Workflow):
     """
     with workflow.cooperative_lock():
         # 1. Load list of wf_modules
-        wf_modules = list(workflow.wf_modules.all())
+        wf_modules = list(workflow.wf_modules.filter(is_deleted=False))
 
         if not wf_modules:
             return [], None

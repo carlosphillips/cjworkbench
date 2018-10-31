@@ -50,7 +50,6 @@ _Tables = [
     'server_aclentry',
     'server_addmodulecommand',
     'server_changedataversioncommand',
-    'server_changeparametercommand',
     'server_changeparameterscommand',
     'server_changewfmodulenotescommand',
     'server_changewfmoduleupdatesettingscommand',
@@ -187,7 +186,7 @@ def load_and_add_module_from_dict(module_dict, workflow=None, param_values={},
         workflow = add_new_workflow('Workflow 1')
 
     module_version = load_module_from_dict(module_dict)
-    num_modules = WfModule.objects.filter(workflow=workflow).count()
+    num_modules = workflow.wf_modules.filter(is_deleted=False).count()
     wf_module = add_new_wf_module(workflow, module_version,
                                   param_values=param_values,
                                   last_relevant_delta_id=last_relevant_delta_id,

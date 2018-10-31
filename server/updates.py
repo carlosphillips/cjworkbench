@@ -21,7 +21,7 @@ async def update_wfm_data_scan():
     wf_modules = list(
         WfModule.objects
         .filter(is_busy=False) # not already scheduled
-        .filter(workflow__isnull=False)  # not deleted
+        .filter(is_deleted=False)
         .filter(auto_update_data=True)  # user wants auto-update
         .exclude(next_update=None)
         .filter(next_update__lte=now)  # enough time has passed

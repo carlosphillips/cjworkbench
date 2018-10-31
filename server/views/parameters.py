@@ -10,7 +10,6 @@ from rest_framework.decorators import api_view, renderer_classes
 from rest_framework.response import Response
 from rest_framework.renderers import JSONRenderer
 from ..models import ParameterSpec, ParameterVal
-from ..models.commands import ChangeParameterCommand
 from ..serializers import ParameterValSerializer
 from .. import triggerrender
 from .. import oauth
@@ -45,23 +44,14 @@ def parameter_val_or_response_for_write(
 
 
 # Get or set parameter value
-@api_view(['GET', 'PATCH'])
+@api_view(['GET'])
 @renderer_classes((JSONRenderer,))
 def parameterval_detail(request, pk, format=None):
-    if request.method == 'GET':
-        param = parameter_val_or_response_for_read(pk, request)
-        if isinstance(param, HttpResponse):
-            return param
-        serializer = ParameterValSerializer(param)
-        return Response(serializer.data)
-
-    elif request.method == 'PATCH':
-        param = parameter_val_or_response_for_write(pk, request)
-        if isinstance(param, HttpResponse):
-            return param
-        async_to_sync(ChangeParameterCommand.create)(param,
-                                                     request.data['value'])
-        return Response(status=status.HTTP_204_NO_CONTENT)
+    param = parameter_val_or_response_for_read(pk, request)
+    if isinstance(param, HttpResponse):
+        return param
+    serializer = ParameterValSerializer(param)
+    return Response(serializer.data)
 
 
 def _oauth_start_authorize(request, param: ParameterVal,

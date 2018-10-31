@@ -387,7 +387,9 @@ def store_external_workflow(wf_module, url) -> ProcessResult:
         if not right_wf_module.user_session_authorized_read(user, None):
             return ProcessResult(error='Access denied to the target workflow')
 
-        right_wf_module = right_wf_module.wf_modules.last()
+        right_wf_module = right_wf_module.wf_modules \
+                .filter(is_deleted=False) \
+                .last()
 
         # Always pull the cached result, so we can't execute() an infinite loop
         right_result = right_wf_module.get_cached_render_result().result

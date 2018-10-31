@@ -223,7 +223,7 @@ async def render_or_reschedule(lock_render: Callable[[int], Awaitable[None]],
 
 async def fetch(*, wf_module_id: int) -> None:
     try:
-        wf_module = WfModule.objects.get(id=wf_module_id)
+        wf_module = WfModule.objects.get(id=wf_module_id, is_deleted=False)
     except WfModule.DoesNotExist:
         logger.info('Skipping fetch of deleted WfModule %d', wf_module_id)
         return
@@ -239,7 +239,7 @@ async def upload_DELETEME(*, wf_module_id: int, uploaded_file_id: int) -> None:
     DELETEME: see https://www.pivotaltracker.com/story/show/161509317
     """
     try:
-        wf_module = WfModule.objects.get(id=wf_module_id)
+        wf_module = WfModule.objects.get(id=wf_module_id, is_deleted=False)
     except WfModule.DoesNotExist:
         logger.info('Skipping upload_DELETEME of deleted WfModule %d',
                     wf_module_id)

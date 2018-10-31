@@ -16,7 +16,8 @@ class ReorderModulesCommand(Delta, ChangesWfModuleOutputs):
     def apply_order(self, order):
         for record in order:
             # may raise WfModule.DoesNotExist if bad ID's
-            wfm = self.workflow.wf_modules.get(pk=record['id'])
+            wfm = self.workflow.wf_modules.get(pk=record['id'],
+                                               is_deleted=False)
             if wfm.order != record['order']:
                 wfm.order = record['order']
                 wfm.save()
@@ -27,7 +28,8 @@ class ReorderModulesCommand(Delta, ChangesWfModuleOutputs):
         self.apply_order(new_order)
 
         min_order = min(record['order'] for record in new_order)
-        wf_module = self.workflow.wf_modules.get(order=min_order)
+        wf_module = self.workflow.wf_modules.get(order=min_order,
+                                                 is_deleted=False)
         self.forward_dependent_wf_module_versions(wf_module)
         wf_module.save()
 
@@ -35,7 +37,8 @@ class ReorderModulesCommand(Delta, ChangesWfModuleOutputs):
         new_order = json.loads(self.new_order)
 
         min_order = min(record['order'] for record in new_order)
-        wf_module = self.workflow.wf_modules.get(order=min_order)
+        wf_module = self.workflow.wf_modules.get(order=min_order,
+                                                 is_deleted=False)
         self.backward_dependent_wf_module_versions(wf_module)
         wf_module.save()
 
@@ -44,7 +47,7 @@ class ReorderModulesCommand(Delta, ChangesWfModuleOutputs):
     @classmethod
     async def create(cls, workflow, new_order):
         # Validation: all id's and orders exist and orders are in range 0..n-1
-        wfms = list(workflow.wf_modules.all())
+        wfms = list(workflow.wf_modules.filter(is_deleted=False))
 
         ids = [wfm.id for wfm in wfms]
         for record in new_order:

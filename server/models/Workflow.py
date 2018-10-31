@@ -1,11 +1,11 @@
 from contextlib import contextmanager
+from typing import Optional
+import warnings
 from django.db import models, transaction
 from django.contrib.auth.models import User
 from django.http import HttpRequest
 from django.urls import reverse
-from server.models.Lesson import Lesson
-from typing import Optional
-import warnings
+from .Lesson import Lesson
 
 # A Workflow is the user's "document," a series of Modules
 class Workflow(models.Model):
@@ -195,7 +195,7 @@ class Workflow(models.Model):
             from server.models.commands import InitWorkflowCommand
             InitWorkflowCommand.create(wf)
 
-            wfms = list(self.wf_modules.all())
+            wfms = list(self.wf_modules.filter(is_deleted=False))
 
             for wfm in wfms:
                 wfm.duplicate(wf)
@@ -221,6 +221,15 @@ class Workflow(models.Model):
 
     def get_absolute_url(self):
         return reverse('workflow', args=[str(self.pk)])
+
+    def delete(self, *args, **kwargs):
+        # Delete deltas before deleting everything else. This avoids trying to
+        # delete a WfModule before its Delta.
+        deltas = list(self.deltas.order_by('-id'))
+        for delta in deltas:
+            delta.delete()
+
+        super().delete(*args, **kwargs)
 
     def __str__(self):
         return self.name + ' - id: ' + str(self.id)

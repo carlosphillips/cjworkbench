@@ -12,6 +12,7 @@ from .ModuleVersion import ModuleVersion
 from .ParameterSpec import ParameterSpec
 from .ParameterVal import ParameterVal
 from .StoredObject import StoredObject
+from .Workflow import Workflow
 
 
 class WfModule(models.Model):
@@ -23,7 +24,11 @@ class WfModule(models.Model):
         wfstr = ' - workflow: ' + self.workflow.__str__()
         return self.get_module_name() + ' - id: ' + str(self.id) + wfstr
 
-    workflow = models.ForeignKey('Workflow', on_delete=models.CASCADE)
+    workflow = models.ForeignKey(
+        Workflow,
+        related_name='wf_modules',
+        on_delete=models.CASCADE
+    )
 
     module_version = models.ForeignKey(
         ModuleVersion,
@@ -65,10 +70,6 @@ class WfModule(models.Model):
     # true means user has not acknowledged email
     has_unseen_notification = models.BooleanField(default=False)
 
-    # Our undo mechanism assigns None to self.workflow_id sometimes. We need to
-    # also store the ID, so we can reference it while deleting.
-    cached_render_result_workflow_id = models.IntegerField(null=True,
-                                                           blank=True)
     cached_render_result_delta_id = models.IntegerField(null=True, blank=True)
     cached_render_result_status = models.CharField(
         null=True,
@@ -105,7 +106,7 @@ class WfModule(models.Model):
         else:
             return WfModule.objects.get(workflow=self.workflow,
                                         order=self.order-1,
-                                        deleted=False)
+                                        is_deleted=False)
 
     def dependent_wf_modules(self) -> List['WfModule']:
         """QuerySet of all WfModules that come after this one, in order."""
@@ -285,7 +286,6 @@ class WfModule(models.Model):
             # assuming file-copy succeeds, copy cached results.
             # Not using `new_wfm.cache_render_result(cached_result.result)`
             # because that would involve reading the whole thing.
-            new_wfm.cached_render_result_workflow_id = to_workflow.id
             new_wfm.cached_render_result_delta_id = \
                 to_workflow.last_delta_id
             for attr in [ 'status', 'error', 'json', 'quick_fixes' ]:

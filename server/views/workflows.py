@@ -57,6 +57,7 @@ def make_init_state(request, workflow=None, modules=None):
         ret['workflow'] = WorkflowSerializer(workflow,
                                              context={'request': request}).data
         wf_modules = workflow.wf_modules \
+            .filter(is_deleted=False) \
             .prefetch_related('parameter_vals__parameter_spec',
                               'module_version')
         wf_module_data_list = WfModuleSerializer(wf_modules, many=True).data
@@ -184,9 +185,12 @@ def render_workflow(request: HttpRequest, workflow: Workflow):
         init_state = make_init_state(request, workflow=workflow,
                                      modules=modules)
 
-        if workflow.wf_modules.exclude(
-            last_relevant_delta_id=F('cached_render_result_delta_id')
-        ).exists():
+        if (
+            workflow.wf_modules
+            .filter(is_deleted=False)
+            .exclude(last_relevant_delta_id=F('cached_render_result_delta_id'))
+            .exists()
+        ):
             # We're returning a Workflow that may have stale WfModules. That's
             # fine, but are we _sure_ the worker is about to render them? Let's
             # double-check. This will handle edge cases such as "we wiped our

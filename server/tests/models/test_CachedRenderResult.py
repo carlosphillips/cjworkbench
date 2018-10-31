@@ -25,7 +25,6 @@ class CachedRenderResultTests(DbTestCase):
         self.wf_module.cache_render_result(2, result)
 
         cached = self.wf_module.get_cached_render_result()
-        self.assertEqual(cached.workflow_id, self.workflow.id)
         self.assertEqual(cached.wf_module_id, self.wf_module.id)
         self.assertEqual(cached.delta_id, 2)
         self.assertEqual(cached.result, result)
@@ -35,7 +34,6 @@ class CachedRenderResultTests(DbTestCase):
         self.wf_module.save()
         db_wf_module = WfModule.objects.get(id=self.wf_module.id)
         from_db = db_wf_module.get_cached_render_result()
-        self.assertEqual(from_db.workflow_id, self.workflow.id)
         self.assertEqual(from_db.wf_module_id, self.wf_module.id)
         self.assertEqual(cached.delta_id, 2)
         self.assertEqual(from_db.result, result)
@@ -121,32 +119,8 @@ class CachedRenderResultTests(DbTestCase):
         self.wf_module.delete()
         self.assertFalse(os.path.isfile(parquet_path))
 
-    def test_delete_after_moved_from_workflow_to_delta(self):
-        # When we move the WfModule out of a workflow (so it's only part of
-        # a Delta), we should clear the cache. Otherwise there isn't a clear
-        # time for cache-clearing: a WfModule without a Workflow doesn't have
-        # the path information it needs to save the cached_render_result.
-        result = ProcessResult(pandas.DataFrame({'a': [1]}))
-        self.wf_module.cache_render_result(2, result)
-        self.wf_module.save()
-
-        parquet_path = self.wf_module.get_cached_render_result().parquet_path
-
-        db_wf_module = WfModule.objects.get(id=self.wf_module.id)
-        db_wf_module.workflow = None
-        db_wf_module.save()
-
-        db_wf_module = WfModule.objects.get(id=self.wf_module.id)
-        db_wf_module.delete()
-
-        self.assertIsNone(db_wf_module.get_cached_render_result())
-        self.assertFalse(os.path.isfile(parquet_path))
-
     def test_assign_none_over_none(self):
-        self.wf_module.workflow = None
-        self.wf_module.save()
         self.wf_module.cache_render_result(None, None)
-
         self.assertIsNone(self.wf_module.get_cached_render_result())
 
     def test_duplicate_copies_fresh_cache(self):

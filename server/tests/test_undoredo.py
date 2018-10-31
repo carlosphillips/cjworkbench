@@ -1,7 +1,7 @@
 from unittest.mock import patch
 from asgiref.sync import async_to_sync
 from server.models import Delta
-from server.models.commands import AddModuleCommand, ChangeParameterCommand, \
+from server.models.commands import AddModuleCommand, ChangeParametersCommand, \
         ChangeWorkflowTitleCommand, ChangeWfModuleNotesCommand
 from server.tests.utils import DbTestCase, load_module_version, \
         add_new_workflow, get_param_by_id_name
@@ -24,8 +24,9 @@ class UndoRedoTests(DbTestCase):
 
     def assertWfModuleVersions(self, expected_versions):
         result = list(
-            self.workflow.wf_modules.values_list('last_relevant_delta_id',
-                                                 flat=True)
+            self.workflow.wf_modules
+            .filter(is_deleted=False)
+            .values_list('last_relevant_delta_id', flat=True)
         )
         self.assertEqual(result, expected_versions)
 
@@ -37,7 +38,7 @@ class UndoRedoTests(DbTestCase):
     # Command types used here are arbitrary, but different so that we test
     # polymorphism
     def test_undo_redo(self):
-        all_modules = self.workflow.wf_modules  # beginning state: nothing
+        all_modules = self.workflow.wf_modules.filter(is_deleted=False)
         self.assertEqual(all_modules.count(), 0)
         self.assertEqual(self.workflow.last_delta_id, None)
 
@@ -72,9 +73,16 @@ class UndoRedoTests(DbTestCase):
         self.assertEqual(self.workflow.revision(), v1)
         self.assertWfModuleVersions([v1])
 
+        wfm = all_modules.first()
+
         # Change a parameter
         pval = get_param_by_id_name('csv')
-        cmd2 = async_to_sync(ChangeParameterCommand.create)(pval, 'some value')
+        cmd2 = async_to_sync(ChangeParametersCommand.create)(
+            workflow=wfm.workflow,
+            wf_module=wfm,
+            new_values={'csv': 'some value'}
+        )
+        pval.refresh_from_db()
         self.assertEqual(pval.value, 'some value')
         self.workflow.refresh_from_db()
         v2 = self.workflow.revision()

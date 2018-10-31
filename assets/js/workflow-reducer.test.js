@@ -76,7 +76,6 @@ describe('Reducer actions', () => {
     WorkbenchAPI.deleteModule.mockReset()
     WorkbenchAPI.setSelectedWfModule.mockReset()
     WorkbenchAPI.updateWfModule.mockReset()
-    WorkbenchAPI.onParamChanged.mockReset()
     WorkbenchAPI.setWfModuleParams.mockReset()
     WorkbenchAPI.markDataVersionsRead.mockReset()
     WorkbenchAPI.reorderWfModules.mockReset()
@@ -367,7 +366,7 @@ describe('Reducer actions', () => {
   })
 
   it('should setParamValueAction', async () => {
-    WorkbenchAPI.onParamChanged.mockImplementation(_ => Promise.resolve({}))
+    WorkbenchAPI.setWfModuleParams.mockImplementation(_ => Promise.resolve({}))
 
     const store = mockStore(testState)
     const done = store.dispatch(wfr.setParamValueAction(1, { value: 'foo' }))
@@ -377,7 +376,7 @@ describe('Reducer actions', () => {
     await done
 
     // should send HTTP request
-    expect(WorkbenchAPI.onParamChanged).toHaveBeenCalledWith(1, { value: 'foo' })
+    expect(WorkbenchAPI.setWfModuleParams).toHaveBeenCalledWith(10, { data: 'foo' })
   })
 
   it('should setWfModuleParams', async () => {
@@ -411,11 +410,11 @@ describe('Reducer actions', () => {
     await store.dispatch(wfr.setParamValueAction(1, { value: 'Some Data' }))
 
     // should send HTTP request
-    expect(WorkbenchAPI.onParamChanged).not.toHaveBeenCalled()
+    expect(WorkbenchAPI.setWfModuleParams).not.toHaveBeenCalled()
   })
 
   it('should setParamValueActionByIdName', async () => {
-    WorkbenchAPI.onParamChanged.mockImplementation(_ => Promise.resolve({}))
+    WorkbenchAPI.setWfModuleParams.mockImplementation(_ => Promise.resolve({}))
 
     const store = mockStore(testState)
     const done = store.dispatch(wfr.setParamValueActionByIdName(10, 'data', { value: 'foo' }))
@@ -424,7 +423,7 @@ describe('Reducer actions', () => {
     expect(store.getState().wfModules['10'].parameter_vals[0].value).toEqual('foo')
 
     // should send HTTP request
-    expect(WorkbenchAPI.onParamChanged).toHaveBeenCalledWith(1, { value: 'foo' })
+    expect(WorkbenchAPI.setWfModuleParams).toHaveBeenCalledWith(10, { data: 'foo' })
     await done
   })
 

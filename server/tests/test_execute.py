@@ -21,10 +21,9 @@ async def fake_send(*args, **kwargs):
 
 
 def cached_render_result_revision_list(workflow):
-    return list(workflow.wf_modules.values_list(
-        'cached_render_result_delta_id',
-        flat=True
-    ))
+    return list(workflow.wf_modules
+                .filter(is_deleted=False)
+                .values_list('cached_render_result_delta_id', flat=True))
 
 
 class ExecuteTests(DbTestCase):
@@ -148,7 +147,7 @@ class ExecuteTests(DbTestCase):
 
     def test_resume_without_rerunning_unneeded_renders(self):
         workflow = create_testdata_workflow(table_csv)
-        wf_module1 = workflow.wf_modules.first()
+        wf_module1 = workflow.wf_modules.filter(is_deleted=False).first()
         wf_module2 = load_and_add_module('selectcolumns', workflow=workflow,
                                          last_relevant_delta_id=1)
         wf_module1.last_relevant_delta_id = 1
@@ -172,7 +171,7 @@ class ExecuteTests(DbTestCase):
     @patch('server.notifications.email_output_delta')
     def test_email_delta(self, email):
         workflow = create_testdata_workflow(table_csv)
-        wf_module1 = workflow.wf_modules.first()
+        wf_module1 = workflow.wf_modules.filter(is_deleted=False).first()
         wf_module1.notifications = True
         wf_module1.save()
         async_to_sync(execute_workflow)(workflow)
@@ -185,7 +184,7 @@ class ExecuteTests(DbTestCase):
     @patch('server.notifications.email_output_delta')
     def test_email_no_delta_when_not_changed(self, email):
         workflow = create_testdata_workflow(table_csv)
-        wf_module1 = workflow.wf_modules.first()
+        wf_module1 = workflow.wf_modules.filter(is_deleted=False).first()
         wf_module1.notifications = True
         wf_module1.save()
         async_to_sync(execute_workflow)(workflow)  # sends one email

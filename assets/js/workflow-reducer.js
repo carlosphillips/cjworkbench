@@ -680,7 +680,9 @@ function setParamValueActionBase (state, dispatch, wfModuleId, paramId, newValue
   return dispatch({
     type: SET_PARAM_VALUE,
     payload: {
-      promise: api.onParamChanged(paramId, newValue),
+      promise: api.setWfModuleParams(wfModuleId, {
+        [paramVal.parameter_spec.id_name]: newValue.value
+      }),
       data: {
         wfModuleId,
         paramId,

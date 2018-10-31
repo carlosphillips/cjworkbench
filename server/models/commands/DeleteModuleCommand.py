@@ -1,8 +1,6 @@
 import logging
 from django.db import models
 from django.db.models import F
-from django.db.models.signals import post_delete
-from django.dispatch import receiver
 from server.models import Delta, WfModule
 from .util import ChangesWfModuleOutputs
 
@@ -20,17 +18,16 @@ class DeleteModuleCommand(Delta, ChangesWfModuleOutputs):
 
     wf_module = models.ForeignKey(WfModule, on_delete=models.PROTECT)
 
-    selected_wf_module = models.IntegerField(null=True, blank=True)
-
     dependent_wf_module_last_delta_ids = \
         ChangesWfModuleOutputs.dependent_wf_module_last_delta_ids
 
     def forward_impl(self):
-        self.wf_module.deleted = True
-        self.wf_module.save(update_fields=['deleted'])
+        self.wf_module.is_deleted = True
+        self.wf_module.save(update_fields=['is_deleted'])
 
         # Decrement every other module's position, to fill the gap we made
         self.workflow.wf_modules \
+                .filter(is_deleted=False) \
                 .filter(order__gt=self.wf_module.order) \
                 .update(order=F('order') - 1)
 
@@ -40,31 +37,30 @@ class DeleteModuleCommand(Delta, ChangesWfModuleOutputs):
         # _subsequent_ modules change.
         try:
             next_wf_module = self.workflow.wf_modules.get(
+                is_deleted=False,
                 order=self.wf_module.order
             )
             self.forward_dependent_wf_module_versions(next_wf_module)
         except WfModule.DoesNotExist:
             self._changed_wf_module_versions = dict()
 
-        # If we are deleting the selected module, then set the previous module
-        # in stack as selected (behavior same as in workflow-reducer.js)
-        selected = self.workflow.selected_wf_module
-        if selected is not None and selected >= self.wf_module.order:
-            selected -= 1
-            if selected >= 0:
-                self.workflow.selected_wf_module = selected
-            else:
-                self.workflow.selected_wf_module = None
-            self.workflow.save(update_fields=['selected_wf_module'])
+        # Mark the previous module in the stack as selected
+        selected = max(0, self.wf_module.order - 1)
+        if self.workflow.wf_modules.filter(is_deleted=False).exists():
+            self.workflow.selected_wf_module = selected
+        else:
+            self.workflow.selected_wf_module = None
+        self.workflow.save(update_fields=['selected_wf_module'])
 
     def backward_impl(self):
-        self.wf_module.deleted = False
-        self.wf_module.save(update_fields=['deleted'])
-
         # Move subsequent modules over to make way for this one.
         self.workflow.wf_modules \
-                .filter(order__ge=self.wf_module.order) \
+                .filter(is_deleted=False) \
+                .filter(order__gte=self.wf_module.order) \
                 .update(order=F('order') + 1)
+
+        self.wf_module.is_deleted = False
+        self.wf_module.save(update_fields=['is_deleted'])
 
         # Set new delta IDs on subsequent modules.
         #
@@ -72,18 +68,15 @@ class DeleteModuleCommand(Delta, ChangesWfModuleOutputs):
         # _subsequent_ modules change.
         try:
             next_wf_module = self.workflow.wf_modules.get(
-                order=self.wf_module.order + 1
+                order=self.wf_module.order + 1,
+                is_deleted=False
             )
             self.forward_dependent_wf_module_versions(next_wf_module)
         except WfModule.DoesNotExist:
             self._changed_wf_module_versions = dict()
 
-        # [adamhooper, 2018-06-19] I don't think there's any hope we can
-        # actually restore selected_wf_module correctly, because sometimes we
-        # update it without a command. But I think focusing the restored module
-        # is something a user could expect.
-        self.workflow.selected_wf_module = self.selected_wf_module
-        self.workflow.save(update_fields=['selected_wf_module'])
+        # Don't set workflow.selected_wf_module. We can't restore it, and we
+        # shouldn't bother trying.
 
     @classmethod
     def amend_create_kwargs(cls, *, workflow, wf_module):
@@ -100,28 +93,33 @@ class DeleteModuleCommand(Delta, ChangesWfModuleOutputs):
         return {
             'workflow': workflow,
             'wf_module': wf_module,
-            'selected_wf_module': workflow.selected_wf_module,
         }
 
     @classmethod
     async def create(cls, wf_module):
-        return await cls.create_impl(
-            workflow=wf_module.workflow,
-            wf_module=wf_module,
-        )
+        # Accept positional arguments
+        return await cls.create_impl(workflow=wf_module.workflow,
+                                     wf_module=wf_module)
 
     @property
     def command_description(self):
         return f'Delete WfModule {self.wf_module}'
 
-# When we are deleted, hard-delete the module if applicable
-@receiver(post_delete, sender=DeleteModuleCommand,
-          dispatch_uid='deletemodulecommand')
-def deletemodulecommand_delete_callback(sender, instance, **kwargs):
-    wf_module = instance.wf_module
 
-    if wf_module and wf_module.is_deleted:
-        try:
-            wf_module.delete()
-        except:
-            logger.exception('Error hard-deleting WfModule')
+# Don't hard-delete the WfModule in post_delete.
+#
+# Normally, we get AddModuleCommand, maybe some ChangeParametersCommands, and
+# then a DeleteModuleCommand. If we're deleting, we _should_ delete in reverse
+# order -- so the post_delete hook should be on AddModuleCommand alone.
+#
+# "But I have an edge case," you say. Maybe we're deleting out of order -- in
+# which case, DeleteModuleCommand should delete the WfModule. But what about
+# all the other out-of-order deletions we can get? If we delete the garbage
+# WfModule in DeleteModuleCommand's post_delete because we expect bulk-deleters
+# to call us incorrectly, then we also need to delete the garbage WfModule in
+# any _other_ command -- e.g., ChangeParametersCommand -- in case _they're_
+# being deleted out of order. It's complicated to handle out-of-order deletion.
+# Let's simplify and declare here, once and for all: out-of-order deletion is
+# an error. Delete commands in the reverse order you've created them.
+#
+# There. Now we don't need (or want) to hard-delete a WfModule here.

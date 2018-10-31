@@ -20,11 +20,19 @@ class CommandTestCase(DbTestCase):
         self.workflow = create_testdata_workflow()
 
     def assertWfModuleVersions(self, expected_versions):
-        result = list(
-            self.workflow.wf_modules.values_list('last_relevant_delta_id',
-                                                 flat=True)
+        positions = list(
+            self.workflow.wf_modules
+                .filter(is_deleted=False)
+                .values_list('order', flat=True)
         )
-        self.assertEqual(result, expected_versions)
+        self.assertEqual(positions, list(range(0, len(expected_versions))))
+
+        versions = list(
+            self.workflow.wf_modules
+                .filter(is_deleted=False)
+                .values_list('last_relevant_delta_id', flat=True)
+        )
+        self.assertEqual(versions, expected_versions)
 
 
 @patch('server.models.Delta.schedule_execute', async_noop)
@@ -38,9 +46,9 @@ class AddDeleteModuleCommandTests(CommandTestCase):
     # Add another module, then undo, redo
     def test_add_module(self):
         # beginning state: one WfModule
-        all_modules = WfModule.objects.filter(workflow=self.workflow)
+        all_modules = self.workflow.wf_modules.filter(is_deleted=False)
         self.assertEqual(all_modules.count(), 1)
-        existing_module = WfModule.objects.first()
+        existing_module = all_modules.first()
 
         self.workflow.refresh_from_db()
         v1 = self.workflow.revision()
@@ -49,17 +57,17 @@ class AddDeleteModuleCommandTests(CommandTestCase):
         # went there and old one is after
         cmd = async_to_sync(AddModuleCommand.create)(self.workflow,
                                                      self.module_version, 0,
-                                                     {'csv': 'A,B\n1,2'}
-        )
+                                                     {'csv': 'A,B\n1,2'})
         self.assertEqual(all_modules.count(), 2)
-        added_module = WfModule.objects.get(workflow=self.workflow, order=0)
+        existing_module.refresh_from_db()
+        added_module = all_modules.get(order=0)
         self.assertNotEqual(added_module, existing_module)
         # Test that supplied param is written
         self.assertEqual(
             len(added_module.parameter_vals.filter(value='A,B\n1,2')),
             1
         )
-        bumped_module = WfModule.objects.get(workflow=self.workflow, order=1)
+        bumped_module = all_modules.get(order=1)
         self.assertEqual(bumped_module, existing_module)
 
         # workflow revision should have been incremented
@@ -75,21 +83,24 @@ class AddDeleteModuleCommandTests(CommandTestCase):
         # undo! undo! ahhhhh everything is on fire! undo!
         async_to_sync(cmd.backward)()
         self.assertEqual(all_modules.count(), 1)
-        self.assertEqual(self.workflow.wf_modules.first(), existing_module)
+        existing_module.refresh_from_db()
+        self.assertEqual(all_modules.first(), existing_module)
 
         # wait no, we wanted that module
         async_to_sync(cmd.forward)()
+        existing_module.refresh_from_db()
         self.assertEqual(all_modules.count(), 2)
-        added_module = WfModule.objects.get(workflow=self.workflow, order=0)
+        added_module = all_modules.get(order=0)
         self.assertNotEqual(added_module, existing_module)
-        bumped_module = WfModule.objects.get(workflow=self.workflow, order=1)
+        bumped_module = all_modules.get(order=1)
         self.assertEqual(bumped_module, existing_module)
 
         # Undo and test deleting the un-applied command. Should delete dangling
         # WfModule too
         async_to_sync(cmd.backward)()
         self.assertEqual(all_modules.count(), 1)
-        self.assertEqual(self.workflow.wf_modules.first(), existing_module)
+        existing_module.refresh_from_db()
+        self.assertEqual(all_modules.first(), existing_module)
         cmd.delete()
         with self.assertRaises(WfModule.DoesNotExist):
             WfModule.objects.get(pk=added_module.id)  # should be gone
@@ -101,7 +112,7 @@ class AddDeleteModuleCommandTests(CommandTestCase):
         v1 = self.workflow.revision()
 
         # beginning state: one WfModule
-        all_modules = self.workflow.wf_modules
+        all_modules = self.workflow.wf_modules.filter(is_deleted=False)
         self.assertEqual(all_modules.count(), 1)
         existing_module = WfModule.objects.first()
         self.assertEqual(existing_module.order, 0)
@@ -160,9 +171,9 @@ class AddDeleteModuleCommandTests(CommandTestCase):
     # Delete module, then undo, redo
     def test_delete_module(self):
         # beginning state: one WfModule
-        all_modules = self.workflow.wf_modules
+        all_modules = self.workflow.wf_modules.filter(is_deleted=False)
         self.assertEqual(all_modules.count(), 1)
-        existing_module = WfModule.objects.first()
+        existing_module = all_modules.first()
 
         self.workflow.refresh_from_db()
         v1 = self.workflow.revision()
@@ -180,7 +191,7 @@ class AddDeleteModuleCommandTests(CommandTestCase):
 
         # Check the delta chain (short, but should be sweet)
         self.workflow.refresh_from_db()
-        self.assertEqual(self.workflow.last_delta, cmd)
+        self.assertEqual(self.workflow.last_delta_id, cmd.id)
         self.assertIsNone(cmd.prev_delta)
         self.assertIsNone(cmd.next_delta)
 
@@ -188,24 +199,19 @@ class AddDeleteModuleCommandTests(CommandTestCase):
         async_to_sync(cmd.backward)()
         self.assertEqual(all_modules.count(), 1)
         self.assertWfModuleVersions([v1])
-        self.assertEqual(self.workflow.wf_modules.first(), existing_module)
+        self.assertEqual(all_modules.first(), existing_module)
 
         # nevermind, redo
         async_to_sync(cmd.forward)()
         self.assertEqual(all_modules.count(), 0)
 
-        # Deleting the appplied command should delete dangling WfModule too
-        cmd.delete()
-        with self.assertRaises(WfModule.DoesNotExist):
-            WfModule.objects.get(pk=existing_module.id)  # should be gone
-
     # ensure that deleting the selected module sets the selected module to
     # null, and is undoable
     def test_delete_selected(self):
         # beginning state: one WfModule
-        all_modules = WfModule.objects.filter(workflow=self.workflow)
+        all_modules = self.workflow.wf_modules.filter(is_deleted=False)
         self.assertEqual(all_modules.count(), 1)
-        existing_module = WfModule.objects.first()
+        existing_module = all_modules.first()
 
         self.workflow.selected_wf_module = 0
         self.workflow.save()
@@ -215,16 +221,14 @@ class AddDeleteModuleCommandTests(CommandTestCase):
         self.workflow.refresh_from_db()
         self.assertIsNone(self.workflow.selected_wf_module)
 
-        async_to_sync(cmd.backward)()
-        self.workflow.refresh_from_db()
-        self.assertEqual(self.workflow.selected_wf_module, 0)
+        async_to_sync(cmd.backward)()  # don't crash
 
     # ensure that adding a module, selecting it, then undo add, prevents
     # dangling selected_wf_module (basically the AddModule equivalent of
     # test_delete_selected)
     def test_add_undo_selected(self):
         # beginning state: one WfModule
-        all_modules = WfModule.objects.filter(workflow=self.workflow)
+        all_modules = self.workflow.wf_modules.filter(is_deleted=False)
         self.assertEqual(all_modules.count(), 1)
 
         cmd = async_to_sync(AddModuleCommand.create)(self.workflow,
@@ -237,7 +241,7 @@ class AddDeleteModuleCommandTests(CommandTestCase):
         async_to_sync(cmd.backward)()
 
         self.workflow.refresh_from_db()
-        self.assertIsNone(self.workflow.selected_wf_module)
+        self.assertEqual(self.workflow.selected_wf_module, 0)
 
     # We had a bug where add then delete caused an error when deleting
     # workflow, since both commands tried to delete the WfModule
@@ -246,8 +250,7 @@ class AddDeleteModuleCommandTests(CommandTestCase):
                                                       self.module_version,
                                                       0, {})
         async_to_sync(DeleteModuleCommand.create)(cmda.wf_module)
-        self.workflow.delete()
-        self.assertTrue(True)  # we didn't crash! Yay, we pass
+        self.workflow.delete()  # don't crash
 
 
 @patch('server.models.Delta.schedule_execute', async_noop)

@@ -207,22 +207,21 @@ class CachedRenderResult:
 
     @staticmethod
     def _clear_wf_module(wf_module: 'WfModule') -> None:
-        workflow_id = wf_module.cached_render_result_workflow_id
+        if wf_module.cached_render_result_delta_id is None:
+            return  # it's already cleared
 
-        wf_module.cached_render_result_workflow_id = None
         wf_module.cached_render_result_delta_id = None
         wf_module.cached_render_result_error = ''
         wf_module.cached_render_result_json = b'null'
         wf_module.cached_render_result_quick_fixes = []
 
-        if workflow_id is not None:
-            # We're setting non-None to None. That means there's probably
-            # a file to delete.
-            parquet_path = _parquet_path(workflow_id, wf_module.id)
-            try:
-                os.remove(parquet_path)
-            except FileNotFoundError:
-                pass
+        # We're setting non-None to None. That means there's probably
+        # a file to delete.
+        parquet_path = _parquet_path(wf_module.workflow_id, wf_module.id)
+        try:
+            os.remove(parquet_path)
+        except FileNotFoundError:
+            pass
 
     @staticmethod
     def assign_wf_module(wf_module: 'WfModule',
@@ -237,9 +236,6 @@ class CachedRenderResult:
         if delta_id is None or result is None:
             return CachedRenderResult._clear_wf_module(wf_module)
 
-        if wf_module.workflow_id is None:
-            raise ValueError('Cannot cache render result on orphan WfModule')
-
         if result:
             error = result.error
             status = result.status
@@ -253,7 +249,6 @@ class CachedRenderResult:
             json_bytes = ''
             quick_fixes = []
 
-        wf_module.cached_render_result_workflow_id = wf_module.workflow_id
         wf_module.cached_render_result_delta_id = delta_id
         wf_module.cached_render_result_error = error
         wf_module.cached_render_result_status = status
