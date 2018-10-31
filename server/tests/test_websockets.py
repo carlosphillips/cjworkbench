@@ -67,11 +67,11 @@ def async_test(f):
                 connection = layer._get_connection_for_loop(loop)
                 await connection.close()  # clean up on the RabbitMQ side
 
-        try:
-            # Run the async function by running the loop to completion
-            return loop.run_until_complete(inner())
-        finally:
-            with self.assertLogs():
+        with self.assertLogs():
+            try:
+                # Run the async function by running the loop to completion
+                return loop.run_until_complete(inner())
+            finally:
                 # log something, so self.assertLogs() doesn't fail
                 logger = logging.getLogger('this-test')
                 logger.info('Warnings from closing event loop:')
