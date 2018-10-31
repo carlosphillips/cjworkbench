@@ -12,8 +12,8 @@ table_csv = 'A,B\n1,2\n3,4'
 table_dataframe = pd.DataFrame({'A': [1, 3], 'B': [2, 4]})
 
 
-fake_future = asyncio.Future()
-fake_future.set_result(None)
+future_none = asyncio.Future()
+future_none.set_result(None)
 
 
 async def fake_send(*args, **kwargs):
@@ -27,11 +27,19 @@ def cached_render_result_revision_list(workflow):
 
 
 class ExecuteTests(DbTestCase):
+    def _execute(self, workflow, *, expect_logs=True):
+        if expect_logs:
+            with self.assertLogs():
+                async_to_sync(execute_workflow)(workflow)
+        else:
+            async_to_sync(execute_workflow)(workflow)
+
+    @patch('server.websockets.ws_client_send_delta_async', fake_send)
     def test_execute_revision_0(self):
         # Don't crash on a new workflow (rev=0, no caches)
         workflow = create_testdata_workflow(table_csv)
         wf_module2 = load_and_add_module('selectcolumns', workflow=workflow)
-        async_to_sync(execute_workflow)(workflow)
+        self._execute(workflow)
         wf_module2.refresh_from_db()
         result = wf_module2.get_cached_render_result().result
 
@@ -43,7 +51,7 @@ class ExecuteTests(DbTestCase):
         workflow = create_testdata_workflow(table_csv)
         wf_module2 = load_and_add_module('selectcolumns', workflow=workflow)
 
-        async_to_sync(execute_workflow)(workflow)
+        self._execute(workflow)
 
         pval = get_param_by_id_name('colnames', wf_module=wf_module2)
         pval.set_value('A')
@@ -51,7 +59,7 @@ class ExecuteTests(DbTestCase):
         wf_module2.last_relevant_delta_id = 2
         wf_module2.save(update_fields=['last_relevant_delta_id'])
 
-        async_to_sync(execute_workflow)(workflow)
+        self._execute(workflow)
 
         wf_module2.refresh_from_db()
         result = wf_module2.get_cached_render_result().result
@@ -61,7 +69,7 @@ class ExecuteTests(DbTestCase):
 
     @patch('server.websockets.ws_client_send_delta_async')
     def test_execute_mark_unreachable(self, send_delta_async):
-        send_delta_async.return_value = fake_future
+        send_delta_async.return_value = future_none
 
         workflow = create_testdata_workflow(table_csv)
         # Default pythoncode value is passthru
@@ -70,7 +78,7 @@ class ExecuteTests(DbTestCase):
                                          param_values={'drop_or_keep': 1,
                                                        'colnames': 'A,B'})
 
-        async_to_sync(execute_workflow)(workflow)
+        self._execute(workflow)
 
         # Should set status of all modules to 'ok'
         wf_module3.refresh_from_db()
@@ -93,7 +101,7 @@ class ExecuteTests(DbTestCase):
         self.assertEqual(wf_module3.status, 'busy')
         self.assertEqual(wf_module2.is_busy, False)  # is_busy is for fetch
 
-        async_to_sync(execute_workflow)(workflow)
+        self._execute(workflow)
 
         # Now we expect module 2 to have 'error', 3 to have 'unreachable'
         wf_module2.refresh_from_db()
@@ -130,21 +138,23 @@ class ExecuteTests(DbTestCase):
             }
         })
 
+    @patch('server.websockets.ws_client_send_delta_async', fake_send)
     def test_execute_cache_hit(self):
         workflow = create_testdata_workflow(table_csv)
         wf_module2 = load_and_add_module('selectcolumns', workflow=workflow)
 
-        async_to_sync(execute_workflow)(workflow)
+        self._execute(workflow)
         wf_module2.refresh_from_db()
         result1 = wf_module2.get_cached_render_result().result
 
         with patch('server.dispatch.module_dispatch_render') as mdr:
-            async_to_sync(execute_workflow)(workflow)
+            self._execute(workflow, expect_logs=False)
             wf_module2.refresh_from_db()
             result2 = wf_module2.get_cached_render_result().result
             self.assertFalse(mdr.called)
             self.assertEqual(result2, result1)
 
+    @patch('server.websockets.ws_client_send_delta_async', fake_send)
     def test_resume_without_rerunning_unneeded_renders(self):
         workflow = create_testdata_workflow(table_csv)
         wf_module1 = workflow.wf_modules.filter(is_deleted=False).first()
@@ -153,7 +163,7 @@ class ExecuteTests(DbTestCase):
         wf_module1.last_relevant_delta_id = 1
         wf_module1.save()
 
-        async_to_sync(execute_workflow)(workflow)
+        self._execute(workflow)
 
         wf_module2.refresh_from_db()
         expected = wf_module2.get_cached_render_result().result
@@ -162,32 +172,34 @@ class ExecuteTests(DbTestCase):
 
         with patch('server.dispatch.module_dispatch_render') as mdr:
             mdr.return_value = expected
-            async_to_sync(execute_workflow)(workflow)
+            self._execute(workflow, expect_logs=False)
             mdr.assert_called_once()
             wf_module2.refresh_from_db()
             result = wf_module2.get_cached_render_result().result
             self.assertEqual(result, expected)
 
+    @patch('server.websockets.ws_client_send_delta_async', fake_send)
     @patch('server.notifications.email_output_delta')
     def test_email_delta(self, email):
         workflow = create_testdata_workflow(table_csv)
         wf_module1 = workflow.wf_modules.filter(is_deleted=False).first()
         wf_module1.notifications = True
         wf_module1.save()
-        async_to_sync(execute_workflow)(workflow)
+        self._execute(workflow)
 
         email.assert_called()
 
         wf_module1.refresh_from_db()
         self.assertTrue(wf_module1.has_unseen_notification)
 
+    @patch('server.websockets.ws_client_send_delta_async', fake_send)
     @patch('server.notifications.email_output_delta')
     def test_email_no_delta_when_not_changed(self, email):
         workflow = create_testdata_workflow(table_csv)
         wf_module1 = workflow.wf_modules.filter(is_deleted=False).first()
         wf_module1.notifications = True
         wf_module1.save()
-        async_to_sync(execute_workflow)(workflow)  # sends one email
-        async_to_sync(execute_workflow)(workflow)  # should not email
+        self._execute(workflow)  # sends one email
+        self._execute(workflow, expect_logs=False)  # should not email
 
         email.assert_called_once()
