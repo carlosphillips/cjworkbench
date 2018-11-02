@@ -13,85 +13,79 @@ class Migration(migrations.Migration):
     operations = [
         migrations.RunSQL([
             """
-            WITH
-            clear_workflow_foreign_keys AS (
-                UPDATE server_workflow SET last_delta_id = NULL
-            ),
+            DO $$BEGIN
+
             -- Delete all deltas
-            x01 AS (DELETE FROM server_addmodulecommand),
-            x02 AS (DELETE FROM server_changedataversioncommand),
-            x03 AS (DELETE FROM server_changeparametercommand),
-            x04 AS (DELETE FROM server_changeparameterscommand),
-            x05 AS (DELETE FROM server_changewfmodulenotescommand),
-            x06 AS (DELETE FROM server_changewfmoduleupdatesettingscommand),
-            x07 AS (DELETE FROM server_changeworkflowtitlecommand),
-            x08 AS (DELETE FROM server_deletemodulecommand),
-            x09 AS (DELETE FROM server_initworkflowcommand),
-            x10 AS (DELETE FROM server_reordermodulescommand),
-            x11 AS (DELETE FROM server_delta),
-            wipe_deleted_params AS (
-                DELETE FROM server_parameterval
-                WHERE wf_module_id IN (
-                    SELECT id FROM server_wfmodule
-                    WHERE workflow_id IS NULL
-                )
-            ),
-            wipe_deleted_stored_objects AS (
-                DELETE FROM server_storedobject
-                WHERE wf_module_id IN (
-                    SELECT id FROM server_wfmodule
-                    WHERE workflow_id IS NULL
-                )
-            ),
-            wipe_deleted_wf_modules AS (
-                DELETE FROM server_wfmodule WHERE workflow_id IS NULL
-            ),
-            wipe_wf_module_cached_render_results AS (
-                UPDATE server_wfmodule
-                SET
-                    cached_render_result_error = '',
-                    cached_render_result_json = 'null',
-                    cached_render_result_workflow_id = NULL,
-                    cached_render_result_delta_id = NULL,
-                    cached_render_result_quick_fixes = '[]',
-                    cached_render_result_status = NULL
-            ),
-            new_deltas AS (
-                INSERT INTO server_delta (
-                    id,
-                    "datetime",
-                    workflow_id,
-                    polymorphic_ctype_id
-                )
-                SELECT
-                    NEXTVAL('server_delta_id_seq'),
-                    NOW(),
-                    w.id,
-                    (SELECT id FROM django_content_type WHERE model = 'initworkflowcommand')
-                FROM server_workflow w
-                RETURNING id, workflow_id
-            ),
-            fill_new_deltas AS (
-                INSERT INTO server_initworkflowcommand (delta_ptr_id)
-                SELECT id FROM new_deltas
-            ),
-            update_workflows AS (
-                UPDATE server_workflow
-                SET last_delta_id = (
-                    SELECT id
-                    FROM new_deltas
-                    WHERE workflow_id = server_workflow.id
-                )
-            ),
-            update_last_relevant_delta_ids AS (
-                UPDATE server_wfmodule
-                SET last_relevant_delta_id = (
-                    SELECT id
-                    FROM new_deltas
-                    WHERE workflow_id = server_wfmodule.workflow_id
-                )
+            UPDATE server_workflow SET last_delta_id = NULL;
+            DELETE FROM server_addmodulecommand;
+            DELETE FROM server_changedataversioncommand;
+            DELETE FROM server_changeparametercommand;
+            DELETE FROM server_changeparameterscommand;
+            DELETE FROM server_changewfmodulenotescommand;
+            DELETE FROM server_changewfmoduleupdatesettingscommand;
+            DELETE FROM server_changeworkflowtitlecommand;
+            DELETE FROM server_deletemodulecommand;
+            DELETE FROM server_initworkflowcommand;
+            DELETE FROM server_reordermodulescommand;
+            DELETE FROM server_delta;
+
+            -- Delete orphaned WfModules.
+            -- (Previously, DeleteWorkflowCommand would point to a WfModule
+            -- that's not attached to a workflow.)
+            DELETE FROM server_parameterval
+            WHERE wf_module_id IN (
+                SELECT id FROM server_wfmodule WHERE workflow_id IS NULL
+            );
+            DELETE FROM server_storedobject
+            WHERE wf_module_id IN (
+                SELECT id FROM server_wfmodule WHERE workflow_id IS NULL
+            );
+            DELETE FROM server_wfmodule WHERE workflow_id IS NULL;
+
+            -- Create new deltas. Every workflow needs at least one delta, so
+            -- we can cache a render result for it. Make them
+            -- InitWorkflowCommand, which is designed just for this and can't
+            -- be undone.
+            INSERT INTO server_delta (
+                id,
+                "datetime",
+                workflow_id,
+                polymorphic_ctype_id
             )
-            SELECT 1
+            SELECT
+                NEXTVAL('server_delta_id_seq'),
+                NOW(),
+                id,
+                (SELECT id FROM django_content_type WHERE model = 'initworkflowcommand')
+            FROM server_workflow;
+
+            INSERT INTO server_initworkflowcommand (delta_ptr_id)
+            SELECT id FROM server_delta;
+
+            UPDATE server_workflow
+            SET last_delta_id = (
+                SELECT id
+                FROM server_delta
+                WHERE server_delta.workflow_id = server_workflow.id
+            );
+
+            -- Wipe render cache and set new last_relevant_delta_id on
+            -- WfModule.
+            UPDATE server_wfmodule
+            SET
+                cached_render_result_error = '',
+                cached_render_result_json = 'null',
+                cached_render_result_workflow_id = NULL,
+                cached_render_result_delta_id = NULL,
+                cached_render_result_quick_fixes = '[]',
+                cached_render_result_status = NULL,
+                last_relevant_delta_id = (
+                    SELECT id
+                    FROM server_delta
+                    WHERE workflow_id = server_wfmodule.workflow_id
+                );
+
+            END$$;
             """
         ])
     ]
