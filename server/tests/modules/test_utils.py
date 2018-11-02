@@ -194,3 +194,9 @@ class WorkflowImport(LoggedInTestCase):
         self.assertEqual(result, ProcessResult(
             error='Target workflow does not exist'
         ))
+
+    def test_workflow_without_modules(self):
+        workflow = Workflow.objects.create()
+        tab = workflow.tabs.create()
+        wfm = WfModule(workflow_id=1)
+        result = store_external_workflow(

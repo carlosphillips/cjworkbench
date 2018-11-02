@@ -17,82 +17,68 @@ class DeleteModuleCommand(Delta, ChangesWfModuleOutputs):
     """
 
     wf_module = models.ForeignKey(WfModule, on_delete=models.PROTECT)
+    wf_module_delta_ids = ChangesWfModuleOutputs.wf_module_delta_ids
 
-    dependent_wf_module_last_delta_ids = \
-        ChangesWfModuleOutputs.dependent_wf_module_last_delta_ids
+    @classmethod
+    def affected_wf_modules(self, wf_module):
+        # Delete doesn't affect the output of wf_module itself: only its
+        # dependents.
+        return super().affected_wf_modules(wf_module) \
+                .exclude(id=wf_module.id)
 
     def forward_impl(self):
         self.wf_module.is_deleted = True
         self.wf_module.save(update_fields=['is_deleted'])
 
+        tab = self.wf_module.tab
+
         # Decrement every other module's position, to fill the gap we made
-        self.workflow.wf_modules \
-                .filter(is_deleted=False) \
+        tab.live_wf_modules \
                 .filter(order__gt=self.wf_module.order) \
                 .update(order=F('order') - 1)
 
-        # Set new delta IDs on subsequent modules.
-        #
-        # self.wf_module's last_relevant_delta_it doesn't change: only
-        # _subsequent_ modules change.
-        try:
-            next_wf_module = self.workflow.wf_modules.get(
-                is_deleted=False,
-                order=self.wf_module.order
-            )
-            self.forward_dependent_wf_module_versions(next_wf_module)
-        except WfModule.DoesNotExist:
-            self._changed_wf_module_versions = dict()
-
         # Mark the previous module in the stack as selected
         selected = max(0, self.wf_module.order - 1)
-        if self.workflow.wf_modules.filter(is_deleted=False).exists():
-            self.workflow.selected_wf_module = selected
+        if tab.live_wf_modules.exists():
+            tab.selected_wf_module_position = selected
         else:
-            self.workflow.selected_wf_module = None
-        self.workflow.save(update_fields=['selected_wf_module'])
+            tab.selected_wf_module_position = None
+        tab.save(update_fields=['selected_wf_module'])
+
+        self.forward_affected_delta_ids()
 
     def backward_impl(self):
+        self.backward_affected_delta_ids()
+
+        tab = self.wf_module.tab
+
         # Move subsequent modules over to make way for this one.
-        self.workflow.wf_modules \
-                .filter(is_deleted=False) \
+        tab.live_wf_modules \
                 .filter(order__gte=self.wf_module.order) \
                 .update(order=F('order') + 1)
 
         self.wf_module.is_deleted = False
         self.wf_module.save(update_fields=['is_deleted'])
 
-        # Set new delta IDs on subsequent modules.
-        #
-        # self.wf_module's last_relevant_delta_it doesn't change: only
-        # _subsequent_ modules change.
-        try:
-            next_wf_module = self.workflow.wf_modules.get(
-                order=self.wf_module.order + 1,
-                is_deleted=False
-            )
-            self.forward_dependent_wf_module_versions(next_wf_module)
-        except WfModule.DoesNotExist:
-            self._changed_wf_module_versions = dict()
-
-        # Don't set workflow.selected_wf_module. We can't restore it, and we
-        # shouldn't bother trying.
+        # Don't set tab.selected_wf_module_position. We can't restore it, and
+        # this operation can't invalidate any value that was there previously.
 
     @classmethod
-    def amend_create_kwargs(cls, *, workflow, wf_module):
+    def amend_create_kwargs(cls, *, wf_module, **kwargs):
         # If wf_module is already deleted, ignore this Delta.
         #
         # This works around a race: what if two users delete the same WfModule
         # at the same time? We want only one Delta to be created.
         # amend_create_kwargs() is called within workflow.cooperative_lock(),
-        # so we can check without racint whether wf_module is already deleted.
+        # so we can check without racing whether wf_module is already deleted.
         wf_module.refresh_from_db()
         if wf_module.is_deleted:
             return None
 
         return {
-            'workflow': workflow,
+            **kwargs,
             'wf_module': wf_module,
+            'wf_module_delta_ids': cls.affected_wf_module_delta_ids(wf_module),
         }
 
     @classmethod

@@ -1,4 +1,5 @@
 import json
+from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.dispatch import receiver
 from server.models import Delta, WfModule
@@ -6,76 +7,58 @@ from .util import ChangesWfModuleOutputs
 
 
 class ReorderModulesCommand(Delta, ChangesWfModuleOutputs):
-    # For simplicity and compactness, we store the order of modules as json strings
-    # in the same format as the patch request: [ { id: x, order: y}, ... ]
-    old_order = models.TextField()
-    new_order = models.TextField()
-    dependent_wf_module_last_delta_ids = \
-        ChangesWfModuleOutputs.dependent_wf_module_last_delta_ids
+    """Overwrite wf_module.order for all wf_modules in a tab."""
 
-    def apply_order(self, order):
-        for record in order:
-            # may raise WfModule.DoesNotExist if bad ID's
-            wfm = self.workflow.wf_modules.get(pk=record['id'],
-                                               is_deleted=False)
-            if wfm.order != record['order']:
-                wfm.order = record['order']
-                wfm.save()
+    tab = models.ForeignKey(Tab, on_delete=models.PROTECT)
+    prev_order = models.ArrayField(models.IntegerField())
+    next_order = models.ArrayField(models.IntegerField())
+    wf_module_delta_ids = ChangesWfModuleOutputs.wf_module_delta_ids
+
+    def apply_order(self, wf_module_ids):
+        wf_modules = dict(self.tab.live_wf_modules.values_list('id', 'order'))
+
+        for position, wf_module_id in enumerate(wf_module_ids):
+            cur_position = wf_modules[wf_module_id]
+            if cur_position != position:
+                WfModule.objects.filter(pk=wf_module_id).update(order=position)
 
     def forward_impl(self):
-        new_order = json.loads(self.new_order)
-
-        self.apply_order(new_order)
-
-        min_order = min(record['order'] for record in new_order)
-        wf_module = self.workflow.wf_modules.get(order=min_order,
-                                                 is_deleted=False)
-        self.forward_dependent_wf_module_versions(wf_module)
-        wf_module.save()
+        self.apply_order(self.next_order)
+        self.forward_affected_delta_ids()
 
     def backward_impl(self):
-        new_order = json.loads(self.new_order)
-
-        min_order = min(record['order'] for record in new_order)
-        wf_module = self.workflow.wf_modules.get(order=min_order,
-                                                 is_deleted=False)
-        self.backward_dependent_wf_module_versions(wf_module)
-        wf_module.save()
-
-        self.apply_order(json.loads(self.old_order))
+        self.apply_order(self.prev_order)
+        self.backward_affected_delta_ids()
 
     @classmethod
-    async def create(cls, workflow, new_order):
-        # Validation: all id's and orders exist and orders are in range 0..n-1
-        wfms = list(workflow.wf_modules.filter(is_deleted=False))
+    async def amend_create_kwargs(cls, *, tab, wf_module_ids, **kwargs):
+        prev_order = list(tab.live_wf_modules.values_list('id', flat=True))
+        next_order = wf_module_ids
 
-        ids = [wfm.id for wfm in wfms]
-        for record in new_order:
-            if not isinstance(record, dict):
-                raise ValueError('JSON data must be an array of {id:x, order:y} objects')
-            if 'id' not in record:
-                raise ValueError('Missing WfModule id')
-            if record['id'] not in ids:
-                raise ValueError('Bad WfModule id')
-            if 'order' not in record:
-                raise ValueError('Missing WfModule order')
+        if set(prev_order) != set(next_order):
+            # This isn't a reordering: the WfModules are different
+            return None
 
-        orders = [record['order'] for record in new_order]
-        orders.sort()
-        if orders != list(range(0, len(orders))):
-            raise ValueError('WfModule orders must be in range 0..n-1')
+        if len(prev_order) != len(next_order):
+            # This isn't a reordering: a WfModule appears twice in one list
+            return None
 
-        # Looks good, let's reorder
-        delta = await cls.create_impl(
-            workflow=workflow,
-            old_order=json.dumps([{'id': wfm.id, 'order': wfm.order} for wfm in wfms]),
-            new_order=json.dumps(new_order)
-        )
+        # Calculate affected modules: skip the matching beginnings of both
+        # lists, because we know the reordering won't affect them.
+        for prev_id, next_id in zip(prev_order, next_order):
+            if prev_id != next_id:
+                wf_module = tab.live_wf_modules.get(pk=prev_id)
+                delta_ids = cls.affected_wf_module_delta_ids(wf_module)
 
-        return delta
+
+        return {
+            **kwargs,
+            'tab': tab,
+            'prev_order': prev_order,
+            'next_order': next_order,
+            'wf_module_delta_ids': delta_ids,
+        }
 
     @property
     def command_description(self):
-        return f'Reorder modules to {self.new_order}'
-
-
+        return f'Reorder modules to {self.next_order}'

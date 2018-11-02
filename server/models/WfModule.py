@@ -12,6 +12,7 @@ from .ModuleVersion import ModuleVersion
 from .ParameterSpec import ParameterSpec
 from .ParameterVal import ParameterVal
 from .StoredObject import StoredObject
+from .Tab import Tab
 from .Workflow import Workflow
 
 
@@ -21,12 +22,25 @@ class WfModule(models.Model):
         ordering = ['order']
 
     def __str__(self):
-        wfstr = ' - workflow: ' + self.workflow.__str__()
-        return self.get_module_name() + ' - id: ' + str(self.id) + wfstr
+        return 'workflow[%d].wf_module[%d] at position (%d,%d): %s'.format(
+            self.tab.workflow_id,
+            self.id,
+            self.tab.position,
+            self.order,
+            self.get_module_name()
+        )
 
-    workflow = models.ForeignKey(
-        Workflow,
-        related_name='wf_modules',
+    @property
+    def workflow(self):
+        return self.tab.workflow
+
+    @property
+    def workflow_id(self):
+        return self.tab.workflow_id
+
+    tab = models.ForeignKey(
+        Tab,
+        related_name='tabs',
         on_delete=models.CASCADE
     )
 
@@ -104,14 +118,8 @@ class WfModule(models.Model):
         if self.order == 0:
             return None
         else:
-            return WfModule.objects.get(workflow=self.workflow,
-                                        order=self.order-1,
-                                        is_deleted=False)
-
-    def dependent_wf_modules(self) -> List['WfModule']:
-        """QuerySet of all WfModules that come after this one, in order."""
-        return self.workflow.wf_modules.filter(is_deleted=False,
-                                               order__gt=self.order)
+            return self.tab.wf_modules.get(order=self.order - 1,
+                                           is_deleted=False)
 
     def get_module_name(self):
         if self.module_version is not None:
@@ -252,10 +260,12 @@ class WfModule(models.Model):
 
     # --- Duplicate ---
     # used when duplicating a whole workflow
-    def duplicate(self, to_workflow):
+    def duplicate(self, to_tab):
+        to_workflow = to_tab.workflow
+
         # Initialize but don't save
         new_wfm = WfModule(
-            workflow=to_workflow,
+            tab=to_tab,
             module_version=self.module_version,
             fetch_error=self.fetch_error,
             stored_data_version=self.stored_data_version,

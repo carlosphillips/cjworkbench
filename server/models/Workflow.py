@@ -44,7 +44,8 @@ class Workflow(models.Model):
     lesson_slug = models.CharField('lesson_slug', max_length=100,
                                    null=True, blank=True)
 
-    selected_wf_module = models.IntegerField(default=None, null=True, blank=True)
+    # there is always a tab
+    selected_tab_position = models.IntegerField(default=0)
 
     last_delta = models.ForeignKey('server.Delta',                # specify as string to avoid circular import
                                    related_name='+',              # + means no backward link
@@ -89,6 +90,10 @@ class Workflow(models.Model):
             self.refresh_from_db()
 
             yield
+
+    @property
+    def live_tabs(self):
+        return self.tabs.filter(is_deleted=False)
 
     @property
     def url_id(self) -> int:
@@ -195,10 +200,9 @@ class Workflow(models.Model):
             from server.models.commands import InitWorkflowCommand
             InitWorkflowCommand.create(wf)
 
-            wfms = list(self.wf_modules.filter(is_deleted=False))
-
-            for wfm in wfms:
-                wfm.duplicate(wf)
+            tabs = list(self.live_tabs)
+            for tab in tabs:
+                tab.duplicate(wf)
 
         return wf
 

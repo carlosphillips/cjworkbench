@@ -1,80 +1,110 @@
+from typing import List
+from django.contrib.postgres.fields import ArrayField
 from django.core.validators import int_list_validator
 from django.db import models
 from server.models import WfModule
 
 
 class ChangesWfModuleOutputs:
-    # List of wf_module.last_relevant_delta_id from _before_ .forward() was
-    # called, for *this* wf_module and the ones *after* it.
-    dependent_wf_module_last_delta_ids = models.CharField(
-        validators=[int_list_validator],
-        blank=True,
-        max_length=99999
-    )
+    """
+    Mixin that tracks wf_module.last_relevant_delta_id on affected WfModules.
 
-    def save_wf_module_versions_in_memory_for_ws_notify(self, wf_module):
-        """Save data, specifically for .ws_notify()."""
-        self._changed_wf_module_versions = dict(
-            wf_module.dependent_wf_modules().values_list(
-                'id',
-                'last_relevant_delta_id'
-            )
+    Usage:
+
+        class MyCommand(Delta, ChangesWfModuleOutputs):
+            wf_module_delta_ids = ChangesWfModuleOutputs.wf_module_delta_ids
+
+            # override
+            @classmethod
+            def amend_create_kwargs(cls, *, wf_module, **kwargs):
+                # You must store affected_wf_module_delta_ids.
+                return {
+                    **kwargs,
+                    'wf_module': wf_module,
+                    'wf_module_delta_ids':
+                        cls.affected_wf_module_delta_ids(wf_module),
+                }
+
+            def forward_impl(self):
+                ...
+                # update wf_modules in database and store
+                # self._changed_wf_module_delta_ids, for websockets message.
+                self.forward_affected_delta_ids()
+
+            def backward_impl(self):
+                ...
+                # update wf_modules in database and store
+                # self._changed_wf_module_delta_ids, for websockets message.
+                self.backward_affected_delta_ids()
+    """
+
+    wf_module_delta_ids = models.ArrayField(
+        models.ArrayField(
+            models.IntegerField(),
+            size=2
         )
+    )
+    """
+    List of (id, last_relevant_delta_id) for WfModules, pre-`forward()`.
+    """
 
-    def forward_dependent_wf_module_versions(self, wf_module):
+    @classmethod
+    def affected_wf_modules(cls, wf_module) -> QuerySet[WfModule]:
+        """
+        QuerySet of all WfModules that may change as a result of this Delta.
+        """
+        return wf_module.tab.live_wf_modules.filter(order__gte=wf_module.order)
+
+    @classmethod
+    def affected_wf_module_delta_ids(cls, wf_module) -> List[Tuple[int, int]]:
+        return cls.affected_wf_modules(wf_module) \
+            .values_list('id', 'last_relevant_delta_id')
+
+    def forward_affected_delta_ids(self):
         """
         Write new last_relevant_delta_id to `wf_module` and its dependents.
 
         As a side-effect, this will save .last_relevant_delta_id on `wf_module`
         and its successors.
         """
-        # Calculate "old" (pre-forward) last_revision_delta_ids, via DB query
-        old_ids = [wf_module.last_relevant_delta_id] + list(
-            wf_module.dependent_wf_modules().values_list(
-                'last_relevant_delta_id',
-                flat=True
-            )
-        )
-        # Save them here -- we're about to overwrite them
-        self.dependent_wf_module_last_delta_ids = ','.join(map(str, old_ids))
+        # Calculate "prev" (pre-forward) last_revision_delta_ids, via DB query.
+        # We only need to calculate this on first forward().
+        if not self.wf_module_delta_ids:
+            self.wf_module_delta_ids = self.affected_wf_modules \
+                    .values_list('id', 'last_relevant_delta_id'))
 
-        # Overwrite them, for this one and previous ones
-        wf_module.last_relevant_delta_id = self.id
-        wf_module.save(update_fields=['last_relevant_delta_id'])
-        wf_module.dependent_wf_modules() \
+        prev_ids = self.wf_module_delta_ids
+
+        # If we have a wf_module in memory, update it.
+        if hasattr(self, 'wf_module_id'):
+            for wfm_id, delta_id in prev_ids:
+                if wfm_id == self.wf_module_id:
+                    self.wf_module.last_relevant_delta_id = delta_id
+
+        self.dependent_wf_modules(wf_module)
             .update(last_relevant_delta_id=self.id)
 
-        self.save_wf_module_versions_in_memory_for_ws_notify(wf_module)
+        # for ws_notify()
+        self._changed_wf_module_versions = dict(
+            (prev_id[0], self.id) for prev_id in prev_ids)
+        )
 
-    def backward_dependent_wf_module_versions(self, wf_module):
+    def backward_affected_delta_ids(self, wf_module):
         """
         Write new last_relevant_delta_id to `wf_module` and its dependents.
 
         You must call `wf_module.save()` after calling this method. Dependents
         will be saved as a side-effect.
         """
-        old_ids = [int(i) for i in
-                   self.dependent_wf_module_last_delta_ids.split(',') if i]
+        prev_ids = self.wf_module_delta_ids
 
-        if not old_ids:
-            # This is an old Delta: it does not know the last relevant delta
-            # IDs. Set all IDs to an over-estimate.
-            wf_module.last_relevant_delta_id = self.prev_delta_id or 0
-            wf_module.dependent_wf_modules() \
-                .update(last_relevant_delta_id=self.prev_delta_id or 0)
+        for wfm_id, delta_id in prev_ids:
+            if wfm_id == wf_module.id:
+                wf_module.last_relevant_delta_id = delta_id
 
-            self.save_wf_module_versions_in_memory_for_ws_notify(wf_module)
-            return
-
-        wf_module.last_relevant_delta_id = old_ids[0] or 0
-
-        dependent_ids = \
-            wf_module.dependent_wf_modules().values_list('id', flat=True)
-        for wfm_id, maybe_delta_id in zip(dependent_ids, old_ids[1:]):
-            if not wfm_id:
-                raise ValueError('More delta IDs than WfModules')
-            delta_id = maybe_delta_id or 0
             WfModule.objects.filter(id=wfm_id) \
                 .update(last_relevant_delta_id=delta_id)
 
-        self.save_wf_module_versions_in_memory_for_ws_notify(wf_module)
+        # for ws_notify()
+        self._changed_wf_module_versions = dict(p for p in prev_ids
+                                                if p[0] != wf_module.id)

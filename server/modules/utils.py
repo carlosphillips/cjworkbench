@@ -8,6 +8,7 @@ from typing import Any, Dict, Callable, Optional
 import aiohttp
 from async_generator import asynccontextmanager  # TODO python 3.7 native
 import cchardet as chardet
+from django.db import DatabaseError
 import pandas
 from pandas import DataFrame
 import pandas.errors
@@ -369,30 +370,39 @@ def store_external_workflow(wf_module, url) -> ProcessResult:
     """
     right_wf_id = get_id_from_url(url)
 
-    with transaction.atomic():
-        try:
-            right_wf_module = Workflow.objects \
-                .select_for_update() \
-                .get(id=right_wf_id)
-        except Workflow.DoesNotExist:
-            return ProcessResult(error='Target workflow does not exist')
+    # Check to see if workflow_id the same
+    if wf_module.workflow_id == right_workflow.id:
+        return ProcessResult(error='Cannot import the current workflow')
 
-        # Check to see if workflow_id the same
-        if wf_module.workflow_id == right_wf_module.id:
-            return ProcessResult(error='Cannot import the current workflow')
+    with transaction.atomic():
+        # Mimic cooperative_lock() on right_workflow, with less overhead. It's
+        # transaction.atomic() and select_for_update().
+        try:
+            right_workflow = Workflow.objects \
+                .select_for_update(nowait=True) \
+                .get(pk=right_wf_id)
+        except Workflow.DoesNotExist:
+            return ProcessResult(error='Target workflow does not exist.')
+        except DatabaseError:
+            return ProcessResult(
+                error='Target workflow is being edited. Please try again.'
+            )
 
         # Make sure _this_ workflow's owner has access permissions to the
         # _other_ workflow
         user = wf_module.workflow.owner
-        if not right_wf_module.user_session_authorized_read(user, None):
+        if not right_workflow.user_session_authorized_read(user, None):
             return ProcessResult(error='Access denied to the target workflow')
 
-        right_wf_module = right_wf_module.wf_modules \
-                .filter(is_deleted=False) \
-                .last()
+        try:
+            right_wf_module = right_workflow \
+                .live_tabs.first() \
+                .live_wf_modules.last()
+        except WfModule.DoesNotExist:
+            return ProcessResult(error='Target workflow is empty')
 
         # Always pull the cached result, so we can't execute() an infinite loop
-        right_result = right_wf_module.get_cached_render_result().result
+        right_result = right_workflow.get_cached_render_result().result
 
     return ProcessResult(dataframe=right_result.dataframe)
 
