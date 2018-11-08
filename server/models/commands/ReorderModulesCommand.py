@@ -2,16 +2,16 @@ import json
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.dispatch import receiver
-from server.models import Delta, WfModule
+from server.models import Delta, Tab, WfModule
 from .util import ChangesWfModuleOutputs
 
 
 class ReorderModulesCommand(Delta, ChangesWfModuleOutputs):
     """Overwrite wf_module.order for all wf_modules in a tab."""
 
-    tab = models.ForeignKey(Tab, on_delete=models.PROTECT)
-    prev_order = models.ArrayField(models.IntegerField())
-    next_order = models.ArrayField(models.IntegerField())
+    tab = models.ForeignKey('Tab', on_delete=models.PROTECT)
+    prev_order = ArrayField(models.IntegerField())
+    next_order = ArrayField(models.IntegerField())
     wf_module_delta_ids = ChangesWfModuleOutputs.wf_module_delta_ids
 
     def apply_order(self, wf_module_ids):

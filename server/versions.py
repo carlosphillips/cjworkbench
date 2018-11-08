@@ -13,28 +13,37 @@ async def WorkflowUndo(workflow):
     """Run workflow.last_delta, backwards."""
     # TODO avoid race undoing the same delta twice (or make it a no-op)
     delta = workflow.last_delta
+    if not delta:
+        # Workflows should have an InitWorkflowCommand that cannot be undone.
+        raise RuntimeError('Integrity error: workflow has no deltas')
 
-    # Undo, if not at the very beginning of undo chain
-    if delta:
-        # Make sure delta.backward() edits the passed `workflow` argument.
-        delta.workflow = workflow
-        await delta.backward()  # uses cooperative lock
+    # Make delta.forward() edits the `workflow` we passed as an arg to this
+    # function.
+    delta.workflow = workflow
+
+    await delta.backward()
 
 
 async def WorkflowRedo(workflow):
     """Run workflow.last_delta.next_delta, forward."""
-    # TODO avoid race undoing the same delta twice (or make it a no-op)
-    if workflow.last_delta:
-        delta = workflow.last_delta.next_delta
-    else:
-        # we are at very beginning of delta chain; find first delta
-        delta = workflow.deltas.filter(prev_delta__isnull=True).first()
+    next_deltas = list(Delta.objects.get(prev_delta_id=workflow.last_delta_id))
 
-    # Redo, if not at very end of undo chain
-    if delta:
-        # Make sure delta.forward() edits the passed `workflow` argument.
-        delta.workflow = workflow
-        await delta.forward()
+    if not next_deltas and not workflow.last_delta:
+        # Workflows should have an InitWorkflowCommand that cannot be undone.
+        raise RuntimeError('Integrity error: workflow has no deltas')
+
+    if len(next_deltas) > 1:
+        raise RuntimeError(
+            'Integrity error: undo stack is a tree, not a stack'
+        )
+
+    delta = next_deltas[0]
+
+    # Make delta.forward() edits the `workflow` we passed as an arg to this
+    # function.
+    delta.workflow = workflow
+
+    await delta.forward()
 
 
 async def save_result_if_changed(

@@ -1,7 +1,7 @@
 import json
 import os
 import shutil
-from typing import List, Optional
+from typing import List, Optional, Union
 from django.contrib.postgres.fields import JSONField
 from django.db import models
 from server import websockets
@@ -38,9 +38,33 @@ class WfModule(models.Model):
     def workflow_id(self):
         return self.tab.workflow_id
 
+    @classmethod
+    def live_in_workflow(cls,
+                         workflow: Union[int, Workflow]) -> models.QuerySet:
+        """
+        QuerySet of not-deleted WfModules in `workflow`.
+
+        You may specify `workflow` by its `pk` or as an object.
+
+        Deleted WfModules and WfModules in deleted Tabs will omitted.
+        """
+        if isinstance(workflow, int):
+            workflow_id = workflow
+        else:
+            workflow_id = workflow.pk
+
+        live_tab_ids_queryset = Tab.objects \
+            .filter(is_deleted=False, workflow_id=workflow_id) \
+            .values_list('id', flat=True)
+
+        workflow.live_tabs.values_list('id', flat=True)
+
+        return cls.objects.filter(is_deleted=False,
+                                  tab_id__in=live_tab_ids_queryset)
+
     tab = models.ForeignKey(
         Tab,
-        related_name='tabs',
+        related_name='wf_modules',
         on_delete=models.CASCADE
     )
 

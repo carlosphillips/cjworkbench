@@ -3,6 +3,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 import io
 import json
+import re
 import tempfile
 from typing import Any, Dict, Callable, Optional
 import aiohttp
@@ -339,23 +340,21 @@ def parse_bytesio(bytesio: io.BytesIO, mime_type: str,
         return ProcessResult(error=f'Unhandled MIME type "{mime_type}"')
 
 
-def _validate_url(url):
-    try:
-        validate = URLValidator()
-        validate(url)
-    except ValidationError:
-        raise ValidationError('Invalid URL')
+_URL_REGEX = re.compile(r'.*/(\d+)/?$')
+_URL_VALIDATOR = URLValidator()
 
 
 def get_id_from_url(url):
-    # TODO: Environment check
-    path = url.strip().split('/')
     try:
-        _validate_url(url)
-        _id = int(path[path.index('workflows') + 1])
-        return _id
-    except ValueError:
-        raise ValueError(f'Error fetching {url}: Invalid workflow URL')
+        _URL_VALIDATOR(url)
+    except ValidationError:
+        raise ValueError('Invalid URL')
+
+    match = _URL_REGEX.match(url)
+    if match is None:
+        raise ValueError('Invalid workflow URL')
+
+    return int(match.group(1))
 
 
 def store_external_workflow(wf_module, url) -> ProcessResult:
@@ -368,10 +367,13 @@ def store_external_workflow(wf_module, url) -> ProcessResult:
         * 'url' is not a URL: it's just something that ends in an integer. (We
           only use the integer.)
     """
-    right_wf_id = get_id_from_url(url)
+    try:
+        right_workflow_id = get_id_from_url(url)
+    except ValueError as err:
+        return ProcessResult(error=str(err))
 
     # Check to see if workflow_id the same
-    if wf_module.workflow_id == right_workflow.id:
+    if wf_module.workflow_id == right_workflow_id:
         return ProcessResult(error='Cannot import the current workflow')
 
     with transaction.atomic():
@@ -380,9 +382,9 @@ def store_external_workflow(wf_module, url) -> ProcessResult:
         try:
             right_workflow = Workflow.objects \
                 .select_for_update(nowait=True) \
-                .get(pk=right_wf_id)
+                .get(pk=right_workflow_id)
         except Workflow.DoesNotExist:
-            return ProcessResult(error='Target workflow does not exist.')
+            return ProcessResult(error='Target workflow does not exist')
         except DatabaseError:
             return ProcessResult(
                 error='Target workflow is being edited. Please try again.'
@@ -394,15 +396,22 @@ def store_external_workflow(wf_module, url) -> ProcessResult:
         if not right_workflow.user_session_authorized_read(user, None):
             return ProcessResult(error='Access denied to the target workflow')
 
-        try:
-            right_wf_module = right_workflow \
-                .live_tabs.first() \
-                .live_wf_modules.last()
-        except WfModule.DoesNotExist:
+        right_wf_module = right_workflow \
+            .live_tabs.first() \
+            .live_wf_modules.last()
+        if right_wf_module is None:
             return ProcessResult(error='Target workflow is empty')
 
-        # Always pull the cached result, so we can't execute() an infinite loop
-        right_result = right_workflow.get_cached_render_result().result
+        # Always pull the cached result, so we can't deadlock
+        cached_result = right_wf_module.get_cached_render_result(
+            only_fresh=True
+        )
+        if not cached_result:
+            return ProcessResult(
+                error='Target workflow is being rendered. Please try again.'
+            )
+
+        return cached_result.result
 
     return ProcessResult(dataframe=right_result.dataframe)
 

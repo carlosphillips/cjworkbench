@@ -7,10 +7,12 @@ class Tab(models.Model):
     class Meta:
         ordering = ['position']
 
-    workflow = models.ForeignKey(Workflow, on_delete=models.CASCADE)
+    workflow = models.ForeignKey(Workflow, related_name='tabs',
+                                 on_delete=models.CASCADE)
     name = models.TextField()
     position = models.IntegerField()
     selected_wf_module_position = models.IntegerField(null=True)
+    is_deleted = models.BooleanField(default=False)
 
     @property
     def live_wf_modules(self):

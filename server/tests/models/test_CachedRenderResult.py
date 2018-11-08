@@ -11,7 +11,8 @@ class CachedRenderResultTests(DbTestCase):
     def setUp(self):
         super().setUp()
         self.workflow = Workflow.objects.create()
-        self.wf_module = self.workflow.wf_modules.create(order=0)
+        self.tab = self.workflow.tabs.create(position=0)
+        self.wf_module = self.tab.wf_modules.create(order=0)
 
     def test_none(self):
         self.assertIsNone(self.wf_module.get_cached_render_result())
@@ -132,8 +133,9 @@ class CachedRenderResultTests(DbTestCase):
         self.wf_module.save()
 
         workflow2 = Workflow.objects.create()
+        tab2 = workflow2.tabs.create(position=0)
         InitWorkflowCommand.create(workflow2)
-        dup = self.wf_module.duplicate(workflow2)
+        dup = self.wf_module.duplicate(tab2)
 
         dup_cached_result = dup.get_cached_render_result()
         self.assertIsNotNone(dup_cached_result)
@@ -148,8 +150,9 @@ class CachedRenderResultTests(DbTestCase):
         self.wf_module.save()
 
         workflow2 = Workflow.objects.create()
+        tab2 = workflow2.tabs.create(position=0)
         InitWorkflowCommand.create(workflow2)
-        dup = self.wf_module.duplicate(workflow2)
+        dup = self.wf_module.duplicate(tab2)
 
         dup_cached_result = dup.get_cached_render_result()
         self.assertIsNone(dup_cached_result)

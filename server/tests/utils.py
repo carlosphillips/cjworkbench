@@ -6,6 +6,7 @@ from django.contrib.auth.models import User
 from django.test import SimpleTestCase
 from server.models import Module, ModuleVersion, Workflow, WfModule, \
         ParameterSpec, ParameterVal
+from server.models.commands import InitWorkflowCommand
 from server.initmodules import load_module_from_dict
 import os
 import io
@@ -25,6 +26,8 @@ mock_xlsx_path = os.path.join(settings.BASE_DIR, 'server/tests/test_data/test.xl
 
 class DbTestCase(SimpleTestCase):
     allow_database_queries = True
+    def setUp(self):
+        clear_db()
 
     def tearDown(self):
         clear_db()
@@ -65,6 +68,7 @@ _Tables = [
     'server_storedobject',
     'server_uploadedfile',
     'server_wfmodule',
+    'server_tab',
     'server_workflow',
     'django_session',
     'auth_group',
@@ -108,13 +112,15 @@ def add_new_workflow(name, *, owner=None, **kwargs):
             kwargs['owner'] = User.objects.create_user(username='username', password='password')
         else:
             kwargs['owner'] = User.objects.first()
-    return Workflow.objects.create(name=name, **kwargs)
+    workflow = Workflow.objects.create(name=name, **kwargs)
+    workflow.tabs.create(position=0)
+    InitWorkflowCommand.create(workflow)
+    return workflow
 
 
 def add_new_wf_module(workflow, module_version, order=0,
                       param_values={}, last_relevant_delta_id=0):
-    wfm = WfModule.objects.create(
-        workflow=workflow,
+    wfm = workflow.tabs.first().wf_modules.create(
         module_version=module_version,
         order=order,
         last_relevant_delta_id=last_relevant_delta_id
@@ -186,7 +192,7 @@ def load_and_add_module_from_dict(module_dict, workflow=None, param_values={},
         workflow = add_new_workflow('Workflow 1')
 
     module_version = load_module_from_dict(module_dict)
-    num_modules = workflow.wf_modules.filter(is_deleted=False).count()
+    num_modules = workflow.tabs.first().live_wf_modules.count()
     wf_module = add_new_wf_module(workflow, module_version,
                                   param_values=param_values,
                                   last_relevant_delta_id=last_relevant_delta_id,

@@ -1,15 +1,16 @@
 import io
 import unittest
 import numpy
-import pandas
+import pandas as pd
+from django.contrib.auth.models import User
 from django.test import SimpleTestCase, override_settings
 from pandas.testing import assert_frame_equal
-from server.models import Workflow
+from server.models import Workflow, Module, ModuleVersion
+from server.models.commands import InitWorkflowCommand
 from server.modules.types import ProcessResult
 from server.modules.utils import build_globals_for_eval, parse_bytesio, \
         turn_header_into_first_row, get_id_from_url, store_external_workflow
-from server.tests.utils import LoggedInTestCase, load_and_add_module, \
-        create_test_user
+from server.tests.utils import DbTestCase, load_and_add_module
 
 
 class SafeExecTest(unittest.TestCase):
@@ -31,7 +32,7 @@ class ParseBytesIoTest(SimpleTestCase):
         result = parse_bytesio(io.BytesIO(b'A\ncaf\xc3\xa9'),
                                'text/csv', 'utf-8')
         expected = ProcessResult(
-            pandas.DataFrame({'A': ['café']}).astype('category')
+            pd.DataFrame({'A': ['café']}).astype('category')
         )
         self.assertEqual(result, expected)
 
@@ -40,7 +41,7 @@ class ParseBytesIoTest(SimpleTestCase):
         result = parse_bytesio(io.BytesIO(b'A\ncaf\xe9'),
                                'text/csv', 'utf-8')
         expected = ProcessResult(
-            pandas.DataFrame({'A': ['caf�']}).astype('category')
+            pd.DataFrame({'A': ['caf�']}).astype('category')
         )
         self.assertEqual(result, expected)
 
@@ -49,7 +50,7 @@ class ParseBytesIoTest(SimpleTestCase):
         result = parse_bytesio(io.BytesIO(b'A\ncaf\xe9'),
                                'text/csv', None)
         expected = ProcessResult(
-            pandas.DataFrame({'A': ['café']}).astype('category')
+            pd.DataFrame({'A': ['café']}).astype('category')
         )
         self.assertEqual(result, expected)
 
@@ -58,7 +59,7 @@ class ParseBytesIoTest(SimpleTestCase):
         result = parse_bytesio(io.BytesIO(b'A\n2000\x962018'),
                                'text/csv', None)
         expected = ProcessResult(
-            pandas.DataFrame({'A': ['2000–2018']}).astype('category')
+            pd.DataFrame({'A': ['2000–2018']}).astype('category')
         )
         self.assertEqual(result, expected)
 
@@ -69,7 +70,7 @@ class ParseBytesIoTest(SimpleTestCase):
             None
         )
         expected = ProcessResult(
-            pandas.DataFrame({'A': ['谢谢你']}).astype('category')
+            pd.DataFrame({'A': ['谢谢你']}).astype('category')
         )
         self.assertEqual(result, expected)
 
@@ -78,7 +79,7 @@ class ParseBytesIoTest(SimpleTestCase):
         result = parse_bytesio(io.BytesIO(b'A\ncaf\xe9'),
                                'text/csv', None)
         expected = ProcessResult(
-            pandas.DataFrame({'A': ['café']}).astype('category')
+            pd.DataFrame({'A': ['café']}).astype('category')
         )
         self.assertEqual(result, expected)
 
@@ -88,7 +89,7 @@ class ParseBytesIoTest(SimpleTestCase):
             {"A": null}
         ]""".encode('utf-8')), 'application/json')
         expected = ProcessResult(
-            pandas.DataFrame({'A': ['a', None]}, dtype=str)
+            pd.DataFrame({'A': ['a', None]}, dtype=str)
         )
         self.assertEqual(result, expected)
 
@@ -98,7 +99,7 @@ class ParseBytesIoTest(SimpleTestCase):
             {"A": "aa", "B": "b"}
         ]""".encode('utf-8')), 'application/json')
         expected = ProcessResult(
-            pandas.DataFrame({'A': ['a', 'aa'], 'B': [numpy.nan, 'b']},
+            pd.DataFrame({'A': ['a', 'aa'], 'B': [numpy.nan, 'b']},
                              dtype=str)
         )
         self.assertEqual(result, expected)
@@ -106,27 +107,27 @@ class ParseBytesIoTest(SimpleTestCase):
     def test_txt_detect_separator_semicolon(self):
         result = parse_bytesio(io.BytesIO(b'A;C\nB;D'),
                                'text/plain', 'utf-8')
-        expected = ProcessResult(pandas.DataFrame({'A': ['B'], 'C': ['D']}))
+        expected = ProcessResult(pd.DataFrame({'A': ['B'], 'C': ['D']}))
         self.assertEqual(result, expected)
 
     def test_txt_detect_separator_tab(self):
         result = parse_bytesio(io.BytesIO(b'A\tC\nB\tD'),
                                'text/plain', 'utf-8')
-        expected = ProcessResult(pandas.DataFrame({'A': ['B'], 'C': ['D']}))
+        expected = ProcessResult(pd.DataFrame({'A': ['B'], 'C': ['D']}))
         self.assertEqual(result, expected)
 
     def test_txt_detect_separator_comma(self):
         result = parse_bytesio(io.BytesIO(b'A,C\nB,D'),
                                'text/plain', 'utf-8')
-        expected = ProcessResult(pandas.DataFrame({'A': ['B'], 'C': ['D']}))
+        expected = ProcessResult(pd.DataFrame({'A': ['B'], 'C': ['D']}))
         self.assertEqual(result, expected)
 
 
 class OtherUtilsTests(SimpleTestCase):
     def test_turn_header_into_first_row(self):
-        result = turn_header_into_first_row(pandas.DataFrame({'A': ['B'],
+        result = turn_header_into_first_row(pd.DataFrame({'A': ['B'],
                                                               'C': ['D']}))
-        expected = pandas.DataFrame({'0': ['A', 'B'], '1': ['C', 'D']})
+        expected = pd.DataFrame({'0': ['A', 'B'], '1': ['C', 'D']})
         assert_frame_equal(result, expected)
 
         # Function should return None when a table has not been uploaded yet
@@ -149,54 +150,139 @@ class OtherUtilsTests(SimpleTestCase):
                 self.assertEqual(get_id_from_url(url), expected_result)
 
 
-class WorkflowImport(LoggedInTestCase):
+class MockWorkflow:
+    """Param to `store_external_workflow()` so we can test its validation"""
+    def __init__(self, id, owner):
+        self.id = id
+        self.owner = owner
+
+
+class MockWfModule:
+    def __init__(self, workflow_id, owner):
+        self.workflow = MockWorkflow(workflow_id, owner)
+
+    @property
+    def workflow_id(self):
+        return self.workflow.id
+
+
+class WorkflowImportTest(DbTestCase):
     def setUp(self):
-        super(WorkflowImport, self).setUp()  # log in
-        self.wfm = load_and_add_module('concaturl')
-        # Second workflow loaded with data
-        self.ext_wfm = load_and_add_module('uploadfile')
-        self.ext_wfm.cache_render_result(
-            delta_id=1,
-            result=ProcessResult(self.ext_wfm.retrieve_fetched_table())
+        super().setUp()
+
+        # self.user, self.workflow: external workflow we'll import from
+        #
+        # Yes, there's a bit of confusion here: MockWfModule is just some param
+        # to `store_external_workflow()` that checks whether we're allowed to
+        # import. self.workflow, self.tab and self.wfm are _real_ data that
+        # we'll fetch from.
+        self.user = User.objects.create(username='user',
+                                        email='user@example.org')
+        self.workflow = Workflow.objects.create(owner=self.user)
+        self.delta = InitWorkflowCommand.create(self.workflow)
+        self.tab = self.workflow.tabs.create(position=0)
+        some_mv = ModuleVersion.objects.create(
+            module=Module.objects.create(id_name='some_mv')
         )
-        self.ext_wfm.save()
+        self.wf_module = self.tab.wf_modules.create(
+            module_version=some_mv,
+            order=0,
+            last_relevant_delta_id=self.delta.id
+        )
 
-    def test_auth(self):
+    def test_access_denied(self):
         # Create otheruser and try to access workflow owned by default user
-        other_user = create_test_user(username='otheruser',
-                                      email='otheruser@email.com')
-        wf = Workflow.objects.create(name='New Workflow', owner=other_user)
-        wfm = load_and_add_module('concaturl', workflow=wf)
-
+        other_user = User.objects.create(username='ext',
+                                         email='ext@example.org')
+        wfm = MockWfModule(-1, other_user)
         result = store_external_workflow(
             wfm,
-            (f'https://app.workbenchdata.com/workflows/'
-             f'{self.ext_wfm.workflow_id}/')
+            f'https://app.workbenchdata.com/workflows/{self.workflow.id}/'
         )
         self.assertEqual(result, ProcessResult(
             error='Access denied to the target workflow'
         ))
 
-    def test_same_workflow(self):
+    def test_deny_import_from_same_workflow(self):
+        wfm = MockWfModule(self.workflow.id, self.user)
         result = store_external_workflow(
-            self.wfm,
-            f'https://app.workbenchdata.com/workflows/{self.wfm.workflow_id}/'
+            wfm,
+            f'https://app.workbenchdata.com/workflows/{self.workflow.id}/'
         )
         self.assertEqual(result, ProcessResult(
             error='Cannot import the current workflow'
         ))
 
     def test_workflow_does_not_exist(self):
+        wfm = MockWfModule(-1, self.user)
         result = store_external_workflow(
-            self.wfm,
-            f'https://app.workbenchdata.com/workflows/99999999999/'
+            wfm,
+            f'https://app.workbenchdata.com/workflows/{self.workflow.id + 1}/'
         )
         self.assertEqual(result, ProcessResult(
             error='Target workflow does not exist'
         ))
 
-    def test_workflow_without_modules(self):
-        workflow = Workflow.objects.create()
-        tab = workflow.tabs.create()
-        wfm = WfModule(workflow_id=1)
+    def test_workflow_has_no_modules(self):
+        wfm = MockWfModule(-1, self.user)
+        self.wf_module.delete()
         result = store_external_workflow(
+            wfm,
+            f'https://app.workbenchdata.com/workflows/{self.workflow.id}/'
+        )
+        self.assertEqual(result, ProcessResult(
+            error='Target workflow is empty'
+        ))
+
+    def test_workflow_not_rendered(self):
+        wfm = MockWfModule(-1, self.user)
+        self.wf_module.cache_render_result(None, None)
+        result = store_external_workflow(
+            wfm,
+            f'https://app.workbenchdata.com/workflows/{self.workflow.id}/'
+        )
+        self.assertEqual(result, ProcessResult(
+            error='Target workflow is being rendered. Please try again.'
+        ))
+
+    def test_deny_invalid_url(self):
+        wfm = MockWfModule(-1, self.user)
+        self.wf_module.cache_render_result(None, None)
+        result = store_external_workflow(wfm, 'htps:x')
+        self.assertEqual(result, ProcessResult(error='Invalid URL'))
+
+    def test_deny_not_workflow_url(self):
+        wfm = MockWfModule(-1, self.user)
+        self.wf_module.cache_render_result(None, None)
+        result = store_external_workflow(
+            wfm,
+            'https://app.workbenchdata.com/workflows/'
+        )
+        self.assertEqual(result, ProcessResult(error='Invalid workflow URL'))
+
+    def test_workflow_rendered_wrong_version(self):
+        wfm = MockWfModule(-1, self.user)
+        self.wf_module.cache_render_result(
+            self.delta.id - 1,
+            ProcessResult(pd.DataFrame({'A': [1]}))
+        )
+        result = store_external_workflow(
+            wfm,
+            f'https://app.workbenchdata.com/workflows/{self.workflow.id}/'
+        )
+        self.assertEqual(result, ProcessResult(
+            error='Target workflow is being rendered. Please try again.'
+        ))
+
+    def test_happy_path(self):
+        wfm = MockWfModule(-1, self.user)
+        self.wf_module.cache_render_result(
+            self.delta.id,
+            ProcessResult(pd.DataFrame({'A': [1]}))
+        )
+        self.wf_module.save()  # TODO make save implicit in cache write?
+        result = store_external_workflow(
+            wfm,
+            f'https://app.workbenchdata.com/workflows/{self.workflow.id}/'
+        )
+        self.assertEqual(result, ProcessResult(pd.DataFrame({'A': [1]})))

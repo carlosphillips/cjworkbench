@@ -5,12 +5,11 @@ import logging
 from channels.layers import get_channel_layer
 from channels.testing import WebsocketCommunicator
 from cjworkbench.asgi import create_url_router
-from django.contrib.auth.models import AnonymousUser
+from django.contrib.auth.models import AnonymousUser, User
 from server.models import Workflow
 from server.websockets import ws_client_rerender_workflow_async, \
         ws_client_wf_module_status_async
-from server.tests.utils import DbTestCase, clear_db, add_new_module_version, \
-        add_new_wf_module, create_test_user
+from server.tests.utils import DbTestCase
 
 
 def async_test(f):
@@ -100,15 +99,11 @@ class FakeSession:
 class ChannelTests(DbTestCase):
     def setUp(self):
         super().setUp()
-        clear_db()
 
-        self.user = create_test_user(username='usual',
-                                     email='usual@example.org')
+        self.user = User.objects.create(username='usual',
+                                        email='usual@example.org')
         self.workflow = Workflow.objects.create(name='Workflow 1',
                                                 owner=self.user)
-        self.wf_id = self.workflow.id
-        self.module = add_new_module_version('Module')
-        self.wf_module = add_new_wf_module(self.workflow, self.module)
         self.application = self.mock_auth_middleware(create_url_router())
 
         self.communicators = []
@@ -130,7 +125,8 @@ class ChannelTests(DbTestCase):
     async def test_deny_other_users_workflow(self, communicate):
         other_workflow = Workflow.objects.create(
                 name='Workflow 2',
-                owner=create_test_user('other', 'other@example.org')
+                owner=User.objects.create(username='other',
+                                          email='other@example.org')
         )
         comm = communicate(self.application,
                            f'/workflows/{other_workflow.id}/')
@@ -192,13 +188,20 @@ class ChannelTests(DbTestCase):
 
     @async_test
     async def test_wf_module_message(self, communicate):
+        class MockWfModule:
+            def __init__(self, id, workflow_id):
+                self.id = id
+                self.workflow_id = workflow_id
+
+        wf_module = MockWfModule(99, self.workflow.id)
+
         comm = communicate(self.application, f'/workflows/{self.workflow.id}/')
         connected, _ = await comm.connect()
         self.assertTrue(connected)
-        await ws_client_wf_module_status_async(self.wf_module, 'busy')
+        await ws_client_wf_module_status_async(wf_module, 'busy')
         response = await comm.receive_from()
         self.assertEqual(json.loads(response), {
-            'id': self.wf_module.id,
+            'id': 99,
             'type': 'wfmodule-status',
             'status': 'busy',
         })

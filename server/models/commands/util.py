@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Tuple
 from django.contrib.postgres.fields import ArrayField
 from django.core.validators import int_list_validator
 from django.db import models
@@ -38,8 +38,8 @@ class ChangesWfModuleOutputs:
                 self.backward_affected_delta_ids()
     """
 
-    wf_module_delta_ids = models.ArrayField(
-        models.ArrayField(
+    wf_module_delta_ids = ArrayField(
+        ArrayField(
             models.IntegerField(),
             size=2
         )
@@ -49,7 +49,7 @@ class ChangesWfModuleOutputs:
     """
 
     @classmethod
-    def affected_wf_modules(cls, wf_module) -> QuerySet[WfModule]:
+    def affected_wf_modules(cls, wf_module) -> models.QuerySet:
         """
         QuerySet of all WfModules that may change as a result of this Delta.
         """
@@ -57,37 +57,28 @@ class ChangesWfModuleOutputs:
 
     @classmethod
     def affected_wf_module_delta_ids(cls, wf_module) -> List[Tuple[int, int]]:
-        return cls.affected_wf_modules(wf_module) \
-            .values_list('id', 'last_relevant_delta_id')
+        return list(cls.affected_wf_modules(wf_module)
+                    .values_list('id', 'last_relevant_delta_id'))
 
     def forward_affected_delta_ids(self):
         """
-        Write new last_relevant_delta_id to `wf_module` and its dependents.
+        Write new last_relevant_delta_id to affected WfModules.
 
-        As a side-effect, this will save .last_relevant_delta_id on `wf_module`
-        and its successors.
+        (This usually includes self.wf_module.)
         """
-        # Calculate "prev" (pre-forward) last_revision_delta_ids, via DB query.
-        # We only need to calculate this on first forward().
-        if not self.wf_module_delta_ids:
-            self.wf_module_delta_ids = self.affected_wf_modules \
-                    .values_list('id', 'last_relevant_delta_id'))
-
         prev_ids = self.wf_module_delta_ids
+        affected_ids = [pi[0] for pi in prev_ids]
 
-        # If we have a wf_module in memory, update it.
-        if hasattr(self, 'wf_module_id'):
-            for wfm_id, delta_id in prev_ids:
-                if wfm_id == self.wf_module_id:
-                    self.wf_module.last_relevant_delta_id = delta_id
-
-        self.dependent_wf_modules(wf_module)
+        WfModule.objects.filter(pk__in=affected_ids) \
             .update(last_relevant_delta_id=self.id)
 
+        # If we have a wf_module in memory, update it.
+        if hasattr(self, 'wf_module_id') and self.wf_module_id in affected_ids:
+            self.wf_module.last_relevant_delta_id = self.id
+
         # for ws_notify()
-        self._changed_wf_module_versions = dict(
-            (prev_id[0], self.id) for prev_id in prev_ids)
-        )
+        self._changed_wf_module_versions = [(pi[0], self.id)
+                                            for pi in prev_ids]
 
     def backward_affected_delta_ids(self, wf_module):
         """
@@ -99,12 +90,13 @@ class ChangesWfModuleOutputs:
         prev_ids = self.wf_module_delta_ids
 
         for wfm_id, delta_id in prev_ids:
-            if wfm_id == wf_module.id:
-                wf_module.last_relevant_delta_id = delta_id
-
             WfModule.objects.filter(id=wfm_id) \
                 .update(last_relevant_delta_id=delta_id)
 
+            if hasattr(self, 'wf_module_id') and wfm_id == wf_module_id:
+                # If we have a wf_module in memory, update it
+                self.wf_module.last_relevant_delta_id = delta_id
+
         # for ws_notify()
-        self._changed_wf_module_versions = dict(p for p in prev_ids
-                                                if p[0] != wf_module.id)
+        self._changed_wf_module_versions = [p for p in prev_ids
+                                            if p[0] != wf_module.id]

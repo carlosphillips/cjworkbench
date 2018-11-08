@@ -1,4 +1,5 @@
 from functools import lru_cache
+import itertools
 from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
@@ -14,11 +15,12 @@ from rest_framework.decorators import renderer_classes
 from rest_framework.response import Response
 from rest_framework.renderers import JSONRenderer
 from server import minio, rabbitmq
-from server.models import Module, ModuleVersion, Workflow
+from server.models import Module, ModuleVersion, Workflow, WfModule
 from server.models.commands import AddModuleCommand, ReorderModulesCommand, \
         ChangeWorkflowTitleCommand
 from server.serializers import WorkflowSerializer, ModuleSerializer, \
-        WorkflowSerializerLite, WfModuleSerializer, UserSerializer
+        TabSerializer, WorkflowSerializerLite, WfModuleSerializer, \
+        UserSerializer
 import server.utils
 from server.versions import WorkflowUndo, WorkflowRedo
 from .auth import lookup_workflow_for_read, lookup_workflow_for_write, \
@@ -56,21 +58,24 @@ def make_init_state(request, workflow=None, modules=None):
         ret['workflowId'] = workflow.id
         ret['workflow'] = WorkflowSerializer(workflow,
                                              context={'request': request}).data
-        wf_modules = workflow.wf_modules \
-            .filter(is_deleted=False) \
-            .prefetch_related('parameter_vals__parameter_spec',
-                              'module_version')
-        wf_module_data_list = WfModuleSerializer(wf_modules, many=True).data
-        ret['wfModules'] = dict([(str(wfm['id']), wfm)
-                                 for wfm in wf_module_data_list])
-        ret['selected_wf_module'] = workflow.selected_wf_module
+
+        tabs = list(workflow.live_tabs)
+        ret['tabs'] = dict((str(tab.id), TabSerializer(tab).data)
+                           for tab in tabs)
+
+        tab_ids = [tab.id for tab in tabs]
+        wf_modules = list(WfModule.objects.filter(is_deleted=False,
+                                                  tab_id__in=tab_ids))
+
+        ret['wfModules'] = dict((str(wfm.id), WfModuleSerializer(wfm).data)
+                                for wfm in wf_modules)
+
         ret['uploadConfig'] = {
             'bucket': minio.UserFilesBucket,
             'accessKey': settings.MINIO_ACCESS_KEY,  # never _SECRET_KEY
             'server': settings.MINIO_EXTERNAL_URL
         }
         ret['user_files_bucket'] = minio.UserFilesBucket
-        del ret['workflow']['selected_wf_module']
 
     if modules:
         modules_data_list = ModuleSerializer(modules, many=True).data
@@ -185,12 +190,7 @@ def render_workflow(request: HttpRequest, workflow: Workflow):
         init_state = make_init_state(request, workflow=workflow,
                                      modules=modules)
 
-        if (
-            workflow.wf_modules
-            .filter(is_deleted=False)
-            .exclude(last_relevant_delta_id=F('cached_render_result_delta_id'))
-            .exists()
-        ):
+        if not workflow.are_all_render_results_fresh():
             # We're returning a Workflow that may have stale WfModules. That's
             # fine, but are we _sure_ the worker is about to render them? Let's
             # double-check. This will handle edge cases such as "we wiped our
@@ -235,7 +235,7 @@ def workflow_detail(request, workflow_id, format=None):
         workflow = lookup_workflow_for_write(workflow_id, request)
 
         try:
-            valid_fields = {'newName', 'public', 'selected_wf_module'}
+            valid_fields = {'newName', 'public', 'selected_tab_position'}
             if not set(request.data.keys()).intersection(valid_fields):
                 raise ValueError('Unknown fields: {}'.format(request.data))
 
@@ -250,10 +250,10 @@ def workflow_detail(request, workflow_id, format=None):
                 workflow.public = request.data['public']
                 workflow.save(update_fields=['public'])
 
-            if 'selected_wf_module' in request.data:
-                workflow.selected_wf_module = \
-                        request.data['selected_wf_module']
-                workflow.save(update_fields=['selected_wf_module'])
+            if 'selected_tab_position' in request.data:
+                workflow.selected_tab_position = \
+                        request.data['selected_tab_position']
+                workflow.save(update_fields=['selected_tab_position'])
 
         except Exception as e:
             return JsonResponse({'message': str(e), 'status_code': 400},
@@ -324,16 +324,15 @@ class Duplicate(View):
         return JsonResponse(serializer.data, status=status.HTTP_201_CREATED)
 
 
-# Undo or redo
 @api_view(['POST'])
 @loads_workflow_for_write
-def workflow_undo_redo(request: HttpRequest, workflow: Workflow, action):
-    if action == 'undo':
-        async_to_sync(WorkflowUndo)(workflow)
-    elif action == 'redo':
-        async_to_sync(WorkflowRedo)(workflow)
-    else:
-        return JsonResponse({'message': '"action" must be "undo" or "redo"'},
-                            status=status.HTTP_400_BAD_REQUEST)
+def workflow_undo(request: HttpRequest, workflow: Workflow):
+    async_to_sync(WorkflowUndo)(workflow)
+    return Response(status=status.HTTP_204_NO_CONTENT)
 
+
+@api_view(['POST'])
+@loads_workflow_for_write
+def workflow_redo(request: HttpRequest, workflow: Workflow):
+    async_to_sync(WorkflowRedo)(workflow)
     return Response(status=status.HTTP_204_NO_CONTENT)

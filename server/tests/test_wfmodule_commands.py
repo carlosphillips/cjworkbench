@@ -5,102 +5,84 @@ import pandas as pd
 from server.models import Module, ModuleVersion, Workflow, WfModule
 from server.models.commands import AddModuleCommand, DeleteModuleCommand, \
         ChangeDataVersionCommand, ChangeWfModuleNotesCommand, \
-        ChangeWfModuleUpdateSettingsCommand, ChangeParametersCommand
-from server.tests.utils import DbTestCase, create_testdata_workflow, \
-        mock_csv_table, mock_csv_table2
+        ChangeWfModuleUpdateSettingsCommand, ChangeParametersCommand, \
+        InitWorkflowCommand
+from server.tests.utils import DbTestCase
 
 
 async def async_noop(*args, **kwargs):
     pass
 
 
-class CommandTestCase(DbTestCase):
+class WfModuleCommandsTest(DbTestCase):
     def setUp(self):
         super().setUp()
-        self.workflow = create_testdata_workflow()
+        self.workflow = Workflow.objects.create()
+        delta1 = InitWorkflowCommand.create(self.workflow)
+        self.v1 = delta1.id
+        self.tab = self.workflow.tabs.create(position=0)
+        module = Module.objects.create()
+        self.module_version = module.module_versions.create(version='1.0')
 
     def assertWfModuleVersions(self, expected_versions):
         positions = list(
-            self.workflow.wf_modules
-                .filter(is_deleted=False)
-                .values_list('order', flat=True)
+            self.tab.live_wf_modules.values_list('order', flat=True)
         )
         self.assertEqual(positions, list(range(0, len(expected_versions))))
 
         versions = list(
-            self.workflow.wf_modules
-                .filter(is_deleted=False)
-                .values_list('last_relevant_delta_id', flat=True)
+            self.tab.live_wf_modules
+            .values_list('last_relevant_delta_id', flat=True)
         )
         self.assertEqual(versions, expected_versions)
-
-
-@patch('server.models.Delta.schedule_execute', async_noop)
-@patch('server.models.Delta.ws_notify', async_noop)
-class AddDeleteModuleCommandTests(CommandTestCase):
-    def setUp(self):
-        super().setUp()
-        # defined by create_testdata_workflow
-        self.module_version = ModuleVersion.objects.first()
 
     # Add another module, then undo, redo
     def test_add_module(self):
         # beginning state: one WfModule
-        all_modules = self.workflow.wf_modules.filter(is_deleted=False)
-        self.assertEqual(all_modules.count(), 1)
-        existing_module = all_modules.first()
-
-        self.workflow.refresh_from_db()
-        v1 = self.workflow.revision()
+        all_modules = self.tab.live_wf_modules
+        wfm1 = all_modules.create(
+            module_version=self.module_version,
+            order=0,
+            last_relevant_delta_id=self.v1
+        )
 
         # Add a module, insert before the existing one, check to make sure it
         # went there and old one is after
-        cmd = async_to_sync(AddModuleCommand.create)(self.workflow,
+        cmd = async_to_sync(AddModuleCommand.create)(self.workflow, self.tab,
                                                      self.module_version, 0,
                                                      {'csv': 'A,B\n1,2'})
         self.assertEqual(all_modules.count(), 2)
-        existing_module.refresh_from_db()
+        wfm1.refresh_from_db()
         added_module = all_modules.get(order=0)
-        self.assertNotEqual(added_module, existing_module)
+        self.assertNotEqual(added_module, wfm1)
         # Test that supplied param is written
         self.assertEqual(
             len(added_module.parameter_vals.filter(value='A,B\n1,2')),
             1
         )
         bumped_module = all_modules.get(order=1)
-        self.assertEqual(bumped_module, existing_module)
+        self.assertEqual(bumped_module, wfm1)
 
         # workflow revision should have been incremented
         self.workflow.refresh_from_db()
-        self.assertGreater(self.workflow.revision(), v1)
-
-        # Check the delta chain (short, but should be sweet)
-        self.workflow.refresh_from_db()
         self.assertEqual(self.workflow.last_delta, cmd)
-        self.assertIsNone(cmd.prev_delta)
-        self.assertIsNone(cmd.next_delta)
 
         # undo! undo! ahhhhh everything is on fire! undo!
         async_to_sync(cmd.backward)()
         self.assertEqual(all_modules.count(), 1)
-        existing_module.refresh_from_db()
-        self.assertEqual(all_modules.first(), existing_module)
+        wfm1.refresh_from_db()
+        self.assertEqual(list(all_modules), [wfm1])
 
         # wait no, we wanted that module
         async_to_sync(cmd.forward)()
-        existing_module.refresh_from_db()
-        self.assertEqual(all_modules.count(), 2)
-        added_module = all_modules.get(order=0)
-        self.assertNotEqual(added_module, existing_module)
-        bumped_module = all_modules.get(order=1)
-        self.assertEqual(bumped_module, existing_module)
+        wfm1.refresh_from_db()
+        self.assertEqual(list(all_modules), [added_module, wfm1])
 
         # Undo and test deleting the un-applied command. Should delete dangling
         # WfModule too
         async_to_sync(cmd.backward)()
-        self.assertEqual(all_modules.count(), 1)
-        existing_module.refresh_from_db()
-        self.assertEqual(all_modules.first(), existing_module)
+        wfm1.refresh_from_db()
+        self.assertEqual(list(all_modules), [wfm1])
         cmd.delete()
         with self.assertRaises(WfModule.DoesNotExist):
             WfModule.objects.get(pk=added_module.id)  # should be gone
@@ -108,42 +90,37 @@ class AddDeleteModuleCommandTests(CommandTestCase):
     # Try inserting at various positions to make sure the renumbering works
     # right Then undo multiple times
     def test_add_many_modules(self):
-        self.workflow.refresh_from_db()
-        v1 = self.workflow.revision()
-
         # beginning state: one WfModule
-        all_modules = self.workflow.wf_modules.filter(is_deleted=False)
-        self.assertEqual(all_modules.count(), 1)
-        existing_module = WfModule.objects.first()
-        self.assertEqual(existing_module.order, 0)
+        all_modules = self.tab.live_wf_modules
+        wfm1 = all_modules.create(module_version=self.module_version, order=0,
+                                  last_relevant_delta_id=v1)
         self.assertWfModuleVersions([v1])
 
         # Insert at beginning
-        cmd1 = async_to_sync(AddModuleCommand.create)(self.workflow,
+        cmd1 = async_to_sync(AddModuleCommand.create)(self.workflow, self.tab,
                                                       self.module_version,
                                                       0, {})
+        v2 = cmd1.id
         self.assertEqual(all_modules.count(), 2)
         self.assertEqual(cmd1.wf_module.order, 0)
-        self.assertNotEqual(cmd1.wf_module, existing_module)
-        v2 = self.workflow.revision()
         self.assertWfModuleVersions([v2, v2])
 
         # Insert at end
-        cmd2 = async_to_sync(AddModuleCommand.create)(self.workflow,
+        cmd2 = async_to_sync(AddModuleCommand.create)(self.workflow, self.tab,
                                                       self.module_version,
                                                       2, {})
+        v3 = cmd2.id
         self.assertEqual(all_modules.count(), 3)
         self.assertEqual(cmd2.wf_module.order, 2)
-        v3 = self.workflow.revision()
         self.assertWfModuleVersions([v2, v2, v3])
 
         # Insert in between two modules
-        cmd3 = async_to_sync(AddModuleCommand.create)(self.workflow,
+        cmd3 = async_to_sync(AddModuleCommand.create)(self.workflow, self.tab,
                                                       self.module_version,
                                                       2, {})
+        v4 = cmd3.id
         self.assertEqual(all_modules.count(), 4)
         self.assertEqual(cmd3.wf_module.order, 2)
-        v4 = self.workflow.revision()
         self.assertWfModuleVersions([v2, v2, v4, v4])
 
         # Check the delta chain, should be 1 <-> 2 <-> 3
@@ -166,169 +143,188 @@ class AddDeleteModuleCommandTests(CommandTestCase):
         self.assertWfModuleVersions([v2, v2])
         async_to_sync(cmd1.backward)()
         self.assertWfModuleVersions([v1])
-        self.assertEqual(all_modules.count(), 1)
+        self.assertEqual(list(all_modules), [wfm1])
 
     # Delete module, then undo, redo
     def test_delete_module(self):
         # beginning state: one WfModule
-        all_modules = self.workflow.wf_modules.filter(is_deleted=False)
+        v1 = self.v1
+        all_modules = self.tab.live_wf_modules
         self.assertEqual(all_modules.count(), 1)
-        existing_module = all_modules.first()
-
-        self.workflow.refresh_from_db()
-        v1 = self.workflow.revision()
-        self.assertWfModuleVersions([v1])
+        wfm1 = all_modules.create(module_version=self.module_version, order=0,
+                                  last_relevant_delta_id=v1)
+        wfm2 = all_modules.create(module_version=self.module_version, order=1,
+                                  last_relevant_delta_id=v1)
+        wfm3 = all_modules.create(module_version=self.module_version, order=2,
+                                  last_relevant_delta_id=v1)
+        self.assertWfModuleVersions([v1, v1, v1])
 
         # Delete it. Yeah, you better run.
-        cmd = async_to_sync(DeleteModuleCommand.create)(existing_module)
-        self.assertEqual(all_modules.count(), 0)
-        self.assertWfModuleVersions([])
-
-        # workflow revision should have been incremented
-        self.workflow.refresh_from_db()
-        v2 = self.workflow.revision()
-        self.assertGreater(v2, v1)
-
-        # Check the delta chain (short, but should be sweet)
-        self.workflow.refresh_from_db()
-        self.assertEqual(self.workflow.last_delta_id, cmd.id)
-        self.assertIsNone(cmd.prev_delta)
-        self.assertIsNone(cmd.next_delta)
+        cmd = async_to_sync(DeleteModuleCommand.create)(wfm2)
+        v2 = cmd.id
+        self.assertWfModuleVersions([v1, v2])
 
         # undo
         async_to_sync(cmd.backward)()
-        self.assertEqual(all_modules.count(), 1)
-        self.assertWfModuleVersions([v1])
-        self.assertEqual(all_modules.first(), existing_module)
+        self.assertWfModuleVersions([v1, v1, v1])
 
-        # nevermind, redo
-        async_to_sync(cmd.forward)()
-        self.assertEqual(all_modules.count(), 0)
-
-    # ensure that deleting the selected module sets the selected module to
-    # null, and is undoable
-    def test_delete_selected(self):
+    def test_delete_only_selected(self):
+        """Deleting a module selects the previous one, server-side."""
         # beginning state: one WfModule
-        all_modules = self.workflow.wf_modules.filter(is_deleted=False)
-        self.assertEqual(all_modules.count(), 1)
-        existing_module = all_modules.first()
+        v1 = self.v1
+        wfm1 = self.tab.live_wf_modules.create(
+            module_version=self.module_version,
+            order=0,
+            last_relevant_delta_id=v1,
+        )
+        wfm2 = self.tab.live_wf_modules.create(
+            module_version=self.module_version,
+            order=0,
+            last_relevant_delta_id=v1,
+        )
 
-        self.workflow.selected_wf_module = 0
-        self.workflow.save()
+        self.tab.selected_wf_module_position = 1
+        self.tab.save(update_fields=['selected_wf_module_position'])
+
+        cmd = async_to_sync(DeleteModuleCommand.create)(wfm2)
+
+        # test pre-refresh (in-memory) and post-refresh (in-database)
+        self.assertEqual(self.tab.selected_wf_module_position, 0)
+        self.tab.refresh_from_db()
+        self.assertEqual(self.tab.selected_wf_module_position, 0)
+
+        async_to_sync(cmd.backward)()  # don't crash
+
+    def test_delete_only_selected(self):
+        """Deleting the only module sets selection to None."""
+        # beginning state: one WfModule
+        v1 = self.v1
+        wfm1 = self.tab.live_wf_modules.create(
+            module_version=self.module_version,
+            order=0,
+            last_relevant_delta_id=v1
+        )
+
+        self.tab.selected_wf_module_position = 0
+        self.tab.save(update_fields=['selected_wf_module_position'])
 
         cmd = async_to_sync(DeleteModuleCommand.create)(existing_module)
 
-        self.workflow.refresh_from_db()
-        self.assertIsNone(self.workflow.selected_wf_module)
+        self.assertIsNone(self.tab.selected_wf_module_position)  # pre-refresh
+        self.tab.refresh_from_db()
+        self.assertIsNone(self.tab.selected_wf_module_position)  # post-refresh
+
+        async_to_sync(cmd.backward)()  # don't crash
+
+    def test_undo_add_only_selected(self):
+        """Undoing the only add sets selection to None."""
+        cmd = async_to_sync(AddModuleCommand.create)(self.workflow, self.tab,
+                                                     self.module_version,
+                                                     0, {})
+        
+
+        self.tab.selected_wf_module_position = 0
+        self.tab.save(update_fields=['selected_wf_module_position'])
+
+        self.assertIsNone(self.tab.selected_wf_module_position)  # pre-refresh
+        self.tab.refresh_from_db()
+        self.assertIsNone(self.tab.selected_wf_module_position)  # post-refresh
 
         async_to_sync(cmd.backward)()  # don't crash
 
     # ensure that adding a module, selecting it, then undo add, prevents
     # dangling selected_wf_module (basically the AddModule equivalent of
     # test_delete_selected)
-    def test_add_undo_selected(self):
-        # beginning state: one WfModule
-        all_modules = self.workflow.wf_modules.filter(is_deleted=False)
-        self.assertEqual(all_modules.count(), 1)
-
-        cmd = async_to_sync(AddModuleCommand.create)(self.workflow,
+    def test_undo_add_selected(self):
+        """Undoing an add sets selection."""
+        self.tab.wf_modules.create(module_version=self.module_version, order=0,
+                                   last_relevant_delta_id=self.v1)
+        cmd = async_to_sync(AddModuleCommand.create)(self.workflow, self.tab,
                                                      self.module_version,
                                                      1, {})
+        
 
-        self.workflow.selected_wf_module = cmd.wf_module.order
-        self.workflow.save()
+        self.tab.selected_wf_module_position = 1
+        self.tab.save(update_fields=['selected_wf_module_position'])
 
-        async_to_sync(cmd.backward)()
+        self.assertIsNone(self.tab.selected_wf_module_position)  # pre-refresh
+        self.tab.refresh_from_db()
+        self.assertIsNone(self.tab.selected_wf_module_position)  # post-refresh
 
-        self.workflow.refresh_from_db()
-        self.assertEqual(self.workflow.selected_wf_module, 0)
+        async_to_sync(cmd.backward)()  # don't crash
 
     # We had a bug where add then delete caused an error when deleting
     # workflow, since both commands tried to delete the WfModule
     def test_add_delete(self):
-        cmda = async_to_sync(AddModuleCommand.create)(self.workflow,
+        cmda = async_to_sync(AddModuleCommand.create)(self.workflow, self.tab,
                                                       self.module_version,
                                                       0, {})
         async_to_sync(DeleteModuleCommand.create)(cmda.wf_module)
         self.workflow.delete()  # don't crash
 
-
-@patch('server.models.Delta.schedule_execute', async_noop)
-@patch('server.models.Delta.ws_notify', async_noop)
-class ChangeDataVersionCommandTests(CommandTestCase):
-    def setUp(self):
-        super().setUp()
-        self.wfm = WfModule.objects.first()
-
-    # Change version, then undo/redo
     def test_change_data_version(self):
+        wfm = self.tab.wf_modules.create(
+            module_version=self.module_version,
+            order=0,
+            last_relevant_delta_id=self.v1
+        )
+
         # Create two data versions, use the second
-        firstver = self.wfm.store_fetched_table(mock_csv_table)
-        secondver = self.wfm.store_fetched_table(mock_csv_table2)
+        firstver = wfm.store_fetched_table(pd.DataFrame({'A': [1]}))
+        secondver = wfm.store_fetched_table(pd.DataFrame({'B': [2]}))
 
-        self.wfm.set_fetched_data_version(secondver)
+        wfm.set_fetched_data_version(secondver)
 
-        self.workflow.refresh_from_db()
-        v1 = self.workflow.revision()
+        v1 = self.v1
 
         # Change back to first version
-        cmd = async_to_sync(ChangeDataVersionCommand.create)(self.wfm,
-                                                             firstver)
-        self.assertEqual(self.wfm.get_fetched_data_version(), firstver)
+        cmd = async_to_sync(ChangeDataVersionCommand.create)(wfm, firstver)
+        v2 = cmd.id
+        self.assertEqual(wfm.get_fetched_data_version(), firstver)
 
-        self.workflow.refresh_from_db()
-        v2 = self.workflow.revision()
-        # workflow revision should have been incremented
-        self.assertGreater(v2, v1)
         self.assertWfModuleVersions([v2])
 
         # undo
         async_to_sync(cmd.backward)()
         self.assertWfModuleVersions([v1])
-        self.assertEqual(self.wfm.get_fetched_data_version(), secondver)
+        self.assertEqual(wfm.get_fetched_data_version(), secondver)
 
         # redo
         async_to_sync(cmd.forward)()
         self.assertWfModuleVersions([v2])
-        self.assertEqual(self.wfm.get_fetched_data_version(), firstver)
+        self.assertEqual(wfm.get_fetched_data_version(), firstver)
 
-
-@patch('server.models.Delta.schedule_execute', async_noop)
-@patch('server.models.Delta.ws_notify', async_noop)
-class ChangeWfModuleNotesCommandTests(CommandTestCase):
-    def setUp(self):
-        super().setUp()
-        self.wfm = WfModule.objects.first()
-
-    # Change notes, then undo/redo
     def test_change_notes(self):
-        firstNote = 'text1'
-        secondNote = 'text2'
-        self.wfm.notes = firstNote
+        wfm = self.tab.wf_modules.create(
+            module_version=self.module_version,
+            order=0,
+            last_relevant_delta_id=self.v1,
+            notes='note1'
+        )
 
         # do
-        cmd = async_to_sync(ChangeWfModuleNotesCommand.create)(self.wfm,
-                                                               secondNote)
-        self.assertEqual(self.wfm.notes, secondNote)
+        cmd = async_to_sync(ChangeWfModuleNotesCommand.create)(wfm, 'note2')
+        self.assertEqual(wfm.notes, 'note2')
+        wfm.refresh_from_db()
+        self.assertEqual(wfm.notes, 'note2')
 
         # undo
         async_to_sync(cmd.backward)()
-        self.assertEqual(self.wfm.notes, firstNote)
+        self.assertEqual(wfm.notes, 'note1')
+        wfm.refresh_from_db()
+        self.assertEqual(wfm.notes, 'note1')
 
         # redo
         async_to_sync(cmd.forward)()
-        self.assertEqual(self.wfm.notes, secondNote)
+        self.assertEqual(wfm.notes, 'note2')
+        wfm.refresh_from_db()
+        self.assertEqual(wfm.notes, 'note2')
 
-
-@patch('server.models.Delta.schedule_execute', async_noop)
-@patch('server.models.Delta.ws_notify', async_noop)
-class ChangeParametersCommandTest(DbTestCase):
     def test_change_parameters(self):
         # Setup: workflow with loadurl module
         #
         # loadurl is a good choice because it has three parameters, two of
         # which are useful.
-        workflow = Workflow.objects.create(name='hi')
         module = Module.objects.create(name='loadurl', id_name='loadurl',
                                        dispatch='loadurl')
         module_version = ModuleVersion.objects.create(
@@ -343,9 +339,10 @@ class ChangeParametersCommandTest(DbTestCase):
         module_version.parameter_specs.create(id_name='version_select',
                                               type='custom', order=2,
                                               def_value='')
-        wf_module = workflow.wf_modules.create(
+        wf_module = self.tab.wf_modules.create(
+            module_version=module_version,
             order=0,
-            module_version=module_version
+            last_relevant_delta_it=self.v1,
         )
         # Set original parameters
         wf_module.create_parametervals({
@@ -380,23 +377,15 @@ class ChangeParametersCommandTest(DbTestCase):
         params4 = wf_module.get_params().to_painful_dict(pd.DataFrame())
         self.assertEqual(params4, params2)
 
-
-@patch('server.models.Delta.schedule_execute', async_noop)
-@patch('server.models.Delta.ws_notify', async_noop)
-class ChangeWfModuleUpdateSettingsCommandTests(DbTestCase):
     def test_change_update_settings(self):
-        workflow = Workflow.objects.create(name='hi')
-        module = Module.objects.create(name='pastecsv', id_name='pastecsv',
-                                       dispatch='pastecsv')
-        module_version = ModuleVersion.objects.create(
-            source_version_hash='1.0',
-            module=module
+        wf_module = self.tab.wf_modules.create(
+            module_version=self.module_version,
+            last_relevant_delta_id=self.v1,
+            order=0,
+            auto_update_data=False,
+            next_update=None,
+            update_interval=600
         )
-        wf_module = WfModule.objects.create(workflow=workflow, order=0,
-                                            module_version=module_version,
-                                            auto_update_data=False,
-                                            next_update=None,
-                                            update_interval=100)
 
         # do
         mydate = timezone.now()
@@ -418,11 +407,11 @@ class ChangeWfModuleUpdateSettingsCommandTests(DbTestCase):
         async_to_sync(cmd.backward)()
         self.assertFalse(wf_module.auto_update_data)
         self.assertEqual(wf_module.next_update, None)
-        self.assertEqual(wf_module.update_interval, 100)
+        self.assertEqual(wf_module.update_interval, 600)
         wf_module.refresh_from_db()
         self.assertFalse(wf_module.auto_update_data)
         self.assertEqual(wf_module.next_update, None)
-        self.assertEqual(wf_module.update_interval, 100)
+        self.assertEqual(wf_module.update_interval, 600)
 
         # redo
         async_to_sync(cmd.forward)()
@@ -433,3 +422,65 @@ class ChangeWfModuleUpdateSettingsCommandTests(DbTestCase):
         self.assertTrue(wf_module.auto_update_data)
         self.assertEqual(wf_module.next_update, mydate)
         self.assertEqual(wf_module.update_interval, 1000)
+
+    def test_reorder_modules(self):
+        all_modules = self.tab.live_wf_modules
+        v1 = self.v1
+
+        wfm1 = all_modules.create(module_version=self.module_version,
+                                  last_relevant_delta_id=v1, order=0)
+        wfm2 = all_modules.create(module_version=self.module_version,
+                                  last_relevant_delta_id=v1, order=1)
+        wfm3 = all_modules.create(module_version=self.module_version,
+                                  last_relevant_delta_id=v1, order=2)
+
+        cmd = async_to_sync(ReorderModulesCommand.create)(
+            workflow=self.workflow,
+            tab=self.tab,
+            wf_module_ids=[wfm1.id, wfm3.id, wfm2.id]
+        )
+        v2 = cmd.id
+        self.assertWfModuleVersions([v1, v2, v2])
+        wfm2.refresh_from_db()
+        wfm3.refresh_from_db()
+        self.assertEqual(list(all_modules), [wfm1, wfm3, wfm2])
+
+        # undo
+        async_to_sync(cmd.backward)()
+        self.assertWfModuleVersions([v1, v1, v1])
+        wfm2.refresh_from_db()
+        wfm3.refresh_from_db()
+        self.assertEqual(list(all_modules), [wfm1, wfm2, wfm3])
+
+        # redo
+        async_to_sync(cmd.forward)()
+        self.assertWfModuleVersions([v1, v2, v2])
+        wfm2.refresh_from_db()
+        wfm3.refresh_from_db()
+        self.assertEqual(list(all_modules), [wfm1, wfm3, wfm2])
+
+    def test_reorder_modules_reject_other_tabs(self):
+        """
+        User cannot game the system: only one tab is allowed.
+
+        (A user should not be able to affect WfModules outside of his/her
+        workflow. There's nothing in the architecture that could lead us there,
+        but let's be absolutely sure by testing.)
+        """
+        all_modules = self.tab.live_wf_modules
+        wfm1 = all_modules.create(module_version=self.module_version,
+                                  last_relevant_delta_id=v1, order=0)
+        wfm2 = all_modules.create(module_version=self.module_version,
+                                  last_relevant_delta_id=v1, order=1)
+
+        tab2 = self.workflow.tabs.create(position=1)
+        wfm3 = tab2.wf_modules.create(module_version=self.module_version,
+                                      last_relevant_delta_id=v1, order=2)
+
+        cmd = async_to_sync(ReorderModulesCommand.create)(
+            workflow=self.workflow,
+            tab=self.tab,
+            wf_module_ids=[wfm1.id, wfm3.id, wfm2.id]
+        )
+        self.assertIsNone(cmd)
+        self.assertWfModuleVersions([self.v1, self.v1])

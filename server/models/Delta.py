@@ -8,7 +8,6 @@ from typing import Any
 from channels.db import database_sync_to_async
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
-import django.utils
 from polymorphic.models import PolymorphicModel
 from server import rabbitmq, websockets
 from server.serializers import WfModuleSerializer
@@ -38,9 +37,9 @@ class Delta(PolymorphicModel):
                                  on_delete=models.CASCADE)
 
     # Deltas on this workflow, a linked list.
-    prev_delta = models.ForeignKey('self', related_name='next_delta',
+    prev_delta = models.ForeignKey('self', related_name='next_deltas',
                                    null=True, on_delete=models.SET_NULL)
-    created_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
 
     @database_sync_to_async
     def _call_forward_and_load_ws_data(self):
@@ -59,7 +58,7 @@ class Delta(PolymorphicModel):
             self.backward_impl()
 
             # Point workflow to previous delta
-            # Only update last_delta_id: other columns may have been edited in
+            # Only update prev_delta_id: other columns may have been edited in
             # backward_impl().
             self.workflow.last_delta = self.prev_delta
             self.workflow.save(update_fields=['last_delta_id'])
@@ -96,7 +95,6 @@ class Delta(PolymorphicModel):
         data = {
             'updateWorkflow': {
                 'name': workflow.name,
-                'revision': workflow.last_relevant_delta_id,
                 'public': workflow.public,
                 'last_update': workflow.last_update().isoformat(),
             },
@@ -133,9 +131,8 @@ class Delta(PolymorphicModel):
 
             data['updateTabs'] = {
                 str(self.wf_module_id): {
-                    'wf_modules': list(
-                        self.tab.live_wf_modules.values_list('id', flat=True)
-                    ),
+                    'wf_module_ids': list(self.wf_module.tab.live_wf_modules
+                                          .values_list('id', flat=True)),
                 },
             }
 
@@ -219,10 +216,10 @@ class Delta(PolymorphicModel):
             if not create_kwargs:
                 return (None, None)
 
-            delete_unapplied_deltas(self.workflow)
+            delete_unapplied_deltas(workflow)
 
             delta = cls.objects.create(*args,
-                                       last_delta_id=workflow.last_delta_id,
+                                       prev_delta_id=workflow.last_delta_id,
                                        **create_kwargs)
             delta.forward_impl()
 
@@ -237,21 +234,22 @@ class Delta(PolymorphicModel):
         raise NotImplemented
 
     def __str__(self):
-        return str(self.datetime) + ' ' + self.command_description
+        return str(self.created_at) + ' ' + self.command_description
 
 
 # Deletes every delta on the workflow that is not currently applied
 # This is what implements undo + make a change -> can't redo
 def delete_unapplied_deltas(workflow):
     # Collect deltas. Linked list => lots of queries :)
-    if not workflow.last_delta:
+    last_delta = workflow.last_delta
+    if not last_delta:
         return
 
     deltas = []
-    delta = workflow.last_delta.next_delta
+    delta = last_delta.next_deltas.first()
     while delta:
         deltas.append(delta)
-        delta = delta.next_delta
+        delta = delta.next_deltas.first()
 
     # Delete in reverse order. Later deltas depend upon earlier ones. (See
     # AddModuleCommand, DeleteModuleCommand.)

@@ -94,16 +94,6 @@ class AddModuleCommand(Delta, ChangesWfModuleOutputs):
             'wf_module_delta_ids': cls.affected_wf_module_delta_ids(wf_module),
         }
 
-    @classmethod
-    async def create(cls, workflow, tab, module_version, position,
-                     param_values):
-        # Accept positional arguments
-        return await cls.create_impl(workflow=workflow,
-                                     tab=tab,
-                                     module_version=module_version,
-                                     order=position,
-                                     param_values=param_values)
-
     @property
     def command_description(self):
         return f'Add WfModule {self.wf_module}'

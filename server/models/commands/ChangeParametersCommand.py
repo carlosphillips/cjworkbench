@@ -8,9 +8,7 @@ class ChangeParametersCommand(Delta, ChangesWfModuleOutputs):
     wf_module = models.ForeignKey(WfModule, null=False)
     old_values = JSONField('old_values')
     new_values = JSONField('new_values')
-
-    dependent_wf_module_last_delta_ids = \
-        ChangesWfModuleOutputs.dependent_wf_module_last_delta_ids
+    wf_module_delta_ids = ChangesWfModuleOutputs.wf_module_delta_ids
 
     def _apply_values(self, values):
         pvs = list(self.wf_module.parameter_vals

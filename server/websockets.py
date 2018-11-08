@@ -99,14 +99,9 @@ async def ws_client_send_delta_async(workflow_id: int,
 async def ws_client_wf_module_status_async(wf_module, status):
     """Tell clients of the wf_module's workflow to reload the wf_module.
     """
-    workflow = wf_module.workflow
-    if workflow is None:
-        # [adamhooper, 2018-05-22] when does this happen?
-        return
-
     message = {
         'type': 'wfmodule-status',
         'id': wf_module.id,
         'status': status
     }
-    await _workflow_group_send(workflow.id, message)
+    await _workflow_group_send(wf_module.workflow_id, message)

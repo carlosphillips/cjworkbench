@@ -38,12 +38,6 @@ function launchWebsocket () {
               data.error_msg ? data.error_msg : ''
             ))
           return
-        case 'set-wf-module':
-          Actions.store.dispatch(Actions.setWfModuleAction(data.data))
-          return
-        case 'set-workflow':
-          Actions.store.dispatch(Actions.setWorkflowAction(data.data))
-          return
         case 'reload-workflow':
           Actions.store.dispatch(Actions.reloadWorkflowAction())
           return

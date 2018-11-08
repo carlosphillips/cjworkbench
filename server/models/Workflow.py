@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from typing import Optional
 import warnings
 from django.db import models, transaction
+from django.db.models import F
 from django.contrib.auth.models import User
 from django.http import HttpRequest
 from django.urls import reverse
@@ -35,7 +36,7 @@ class Workflow(models.Model):
     """
     If this is a duplicate, the Workflow it is based on.
 
-    TODO add revision? Currently, we only use this field for `url_id`.
+    TODO add last_delta_id? Currently, we only use this field for `url_id`.
     """
 
     public = models.BooleanField(default=False)
@@ -176,24 +177,20 @@ class Workflow(models.Model):
     def last_update(self):
         if not self.last_delta:
             return self.creation_date
-        return self.last_delta.datetime
-
-    # use last delta ID as (non sequential) revision number, as later deltas
-    # will always have later ids
-    def revision(self):
-        if not self.last_delta_id:
-            return 0
-        else:
-            return self.last_delta_id
+        return self.last_delta.created_at
 
     def _duplicate(self, name: str, owner: Optional[User],
                    session_key: Optional[str]) -> 'Workflow':
         with self.cooperative_lock():
-            wf = Workflow.objects.create(name=name, owner=owner,
-                                         original_workflow_id=self.pk,
-                                         anonymous_owner_session_key=session_key,
-                                         selected_wf_module=self.selected_wf_module,
-                                         public=False, last_delta=None)
+            wf = Workflow.objects.create(
+                name=name,
+                owner=owner,
+                original_workflow_id=self.pk,
+                anonymous_owner_session_key=session_key,
+                selected_tab_position=self.selected_tab_position,
+                public=False,
+                last_delta=None
+            )
 
             # Set wf.last_delta and wf.last_delta_id, so we can render.
             # Import here to avoid circular deps
@@ -237,6 +234,17 @@ class Workflow(models.Model):
 
     def __str__(self):
         return self.name + ' - id: ' + str(self.id)
+
+    def are_all_render_results_fresh(self):
+        """Query whether all live WfModules are rendered."""
+        from .WfModule import WfModule
+        return WfModule.objects \
+            .filter(tab_id__in=self.live_tabs.values_list('id')) \
+            .filter(is_deleted=False) \
+            .exclude(
+                last_relevant_delta_id=F('cached_render_result_delta_id')
+            ) \
+            .exists()
 
     @property
     def lesson(self):
