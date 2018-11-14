@@ -122,6 +122,12 @@ class ParseBytesIoTest(SimpleTestCase):
         expected = ProcessResult(pd.DataFrame({'A': ['B'], 'C': ['D']}))
         self.assertEqual(result, expected)
 
+    def test_csv_detect_separator_semicolon(self):
+        result = parse_bytesio(io.BytesIO(b'A;C\nB;D'),
+                               'text/csv', 'utf-8')
+        expected = ProcessResult(pd.DataFrame({'A': ['B'], 'C': ['D']}))
+        self.assertEqual(result, expected)
+
 
 class OtherUtilsTests(SimpleTestCase):
     def test_turn_header_into_first_row(self):

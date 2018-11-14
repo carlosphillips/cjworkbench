@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import patch
 from asgiref.sync import async_to_sync
 from django.utils import timezone
@@ -13,7 +14,12 @@ from server.tests.utils import DbTestCase
 async def async_noop(*args, **kwargs):
     pass
 
+future_none = asyncio.Future()
+future_none.set_result(None)
 
+
+@patch('server.rabbit.queue_render', async_noop)
+@patch('server.websockets.ws_client_send_delta_async', async_noop)
 class WfModuleCommandsTest(DbTestCase):
     def setUp(self):
         super().setUp()
@@ -221,7 +227,6 @@ class WfModuleCommandsTest(DbTestCase):
         cmd = async_to_sync(AddModuleCommand.create)(self.workflow, self.tab,
                                                      self.module_version,
                                                      0, {})
-        
 
         self.tab.selected_wf_module_position = 0
         self.tab.save(update_fields=['selected_wf_module_position'])
@@ -242,7 +247,6 @@ class WfModuleCommandsTest(DbTestCase):
         cmd = async_to_sync(AddModuleCommand.create)(self.workflow, self.tab,
                                                      self.module_version,
                                                      1, {})
-        
 
         self.tab.selected_wf_module_position = 1
         self.tab.save(update_fields=['selected_wf_module_position'])
@@ -292,7 +296,48 @@ class WfModuleCommandsTest(DbTestCase):
         # redo
         async_to_sync(cmd.forward)()
         self.assertWfModuleVersions([v2])
-        self.assertEqual(wfm.get_fetched_data_version(), firstver)
+        self.assertEqual(self.wfm.get_fetched_data_version(), firstver)
+
+    @patch('server.rabbitmq.queue_render')
+    def test_change_version_queue_render_if_notifying(self, queue_render):
+        queue_render.return_value = future_none
+
+        df1 = pd.DataFrame({'A': [1]})
+        df2 = pd.DataFrame({'B': [2]})
+        date1 = self.wfm.store_fetched_table(df1)
+        date2 = self.wfm.store_fetched_table(df2)
+
+        self.wfm.notifications = True
+        self.wfm.set_fetched_data_version(date1)
+        self.wfm.save()
+
+        delta = async_to_sync(ChangeDataVersionCommand.create)(self.wfm, date2)
+
+        queue_render.assert_called_with(self.wfm.workflow_id, delta.id)
+
+    @patch('server.websockets.queue_render_if_listening')
+    @patch('server.rabbitmq.queue_render')
+    def test_change_version_queue_render_if_listening_and_no_notification(
+        self,
+        queue_render,
+        queue_render_if_listening
+    ):
+        queue_render_if_listening.return_value = future_none
+
+        df1 = pd.DataFrame({'A': [1]})
+        df2 = pd.DataFrame({'B': [2]})
+        date1 = self.wfm.store_fetched_table(df1)
+        date2 = self.wfm.store_fetched_table(df2)
+
+        self.wfm.notifications = False
+        self.wfm.set_fetched_data_version(date1)
+        self.wfm.save()
+
+        delta = async_to_sync(ChangeDataVersionCommand.create)(self.wfm, date2)
+
+        queue_render.assert_not_called()
+        queue_render_if_listening.assert_called_with(self.wfm.workflow_id,
+                                                     delta.id)
 
     def test_change_notes(self):
         wfm = self.tab.wf_modules.create(

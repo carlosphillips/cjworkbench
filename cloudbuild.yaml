@@ -1,6 +1,8 @@
 # See https://cloud.google.com/cloud-build/docs/build-debug-locally for debug
 # instructions.
-timeout: 1800s
+timeout: 2400s
+options:
+  machineType: N1_HIGHCPU_8
 steps:
 # cache-from doesn't work well with multi-stage builds yet: see
 # https://github.com/moby/moby/issues/32612. We don't win if we pull down
@@ -62,7 +64,7 @@ steps:
 - name: 'docker/compose:1.21.2'
   args: [ '-f', 'server/tests/docker-compose.yml',
           'run',
-          'unittest',
+          'unittest'
         ]
   env:
     - 'PROJECT_ID=$PROJECT_ID'

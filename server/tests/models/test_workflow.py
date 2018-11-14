@@ -51,7 +51,8 @@ class WorkflowTests(LoggedInTestCase):
         self.assertEqual(wf2.deltas.all().count(), 1)
         self.assertIsInstance(wf2.last_delta, InitWorkflowCommand)
         self.assertFalse(wf2.public)
-        self.assertEqual(wf1.wf_modules.count(), wf2.wf_modules.count())
+        self.assertEqual(wf1.tabs.first().wf_modules.count(),
+                         wf2.tabs.first().wf_modules.count())
 
     def test_auth_shared_workflow(self):
         wf = Workflow.objects.create(owner=self.user, public=True)

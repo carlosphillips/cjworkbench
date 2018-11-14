@@ -166,8 +166,11 @@ def _parse_csv(bytesio: io.BytesIO, text_encoding: _TextEncoding) -> DataFrame:
     * The file encoding defaults to UTF-8.
     * Data types. This is a CSV, so every value is a string ... _but_ we do the
       pandas default auto-detection.
+    * For compatibility with EU CSVs we detect the separator
     """
-    return _parse_table(bytesio, ',', text_encoding)
+    with _wrap_text(bytesio, text_encoding) as textio:
+        sep = _detect_separator(textio)
+        return _parse_table(bytesio, sep, text_encoding)
 
 
 def _parse_tsv(bytesio: io.BytesIO, text_encoding: _TextEncoding) -> DataFrame:
@@ -433,6 +436,8 @@ async def spooled_data_from_url(url: str, headers: Dict[str, str]={},
             async with session.get(url, headers=headers,
                                    timeout=timeout,
                                    raise_for_status=True) as response:
+                response.raise_for_status()
+
                 async for blob in \
                         response.content.iter_chunked(_ChunkSize):
                     spool.write(blob)

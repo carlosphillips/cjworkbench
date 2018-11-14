@@ -2,7 +2,6 @@ import asyncio
 import contextlib
 import datetime
 from typing import Any, Dict, Optional, Tuple
-from asgiref.sync import async_to_sync
 from channels.db import database_sync_to_async
 from server import dispatch, notifications
 from server.models import CachedRenderResult, WfModule, Workflow
@@ -268,10 +267,7 @@ def _load_tabs_wf_modules_and_input(workflow: Workflow):
             wf_modules_needing_render = wf_modules[index:]
 
             if not wf_modules_needing_render:
-                # We're up to date!
-                output = None
-
-                ret.append(([], output))
+                # We're up to date! Skip the entire tab.
                 continue
 
             # 4. Load input
@@ -300,6 +296,9 @@ async def execute_workflow(workflow: Workflow) -> Optional[CachedRenderResult]:
     we notify clients of its new columns and status.
     """
     tabs_work = await _load_tabs_wf_modules_and_input(workflow)
+
+    if not tabs_work:
+        return last_cached_result
 
     for wf_modules, last_cached_result in tabs_work:
         # Execute one module at a time.

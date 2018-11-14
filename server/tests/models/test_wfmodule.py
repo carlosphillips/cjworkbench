@@ -69,6 +69,23 @@ class WfModuleTests(WfModuleTestsBase):
         pval = ParameterVal.objects.get(parameter_spec=self.pspec31, wf_module=self.wfmodule3)
         self.assertEqual(pval.visible, True)
 
+    def test_retrieve_table_error_missing_version(self):
+        '''
+        If user selects a version and then the version disappers, no version is
+        selected; return `None`.
+
+        Returning `None` is kinda arbitrary. Another option is to return the
+        latest version; but then, what if the caller also looks at
+        wf_module.stored_data_version? The two values would be inconsistent.
+        '''
+        table1 = pd.DataFrame({'A': [1]})
+        table2 = pd.DataFrame({'B': [2]})
+        stored_object1 = self.wfmodule1.store_fetched_table(table1)
+        self.wfmodule1.store_fetched_table(table2)
+        self.wfmodule1.set_fetched_data_version(stored_object1)
+        self.wfmodule1.stored_objects.get(stored_at=stored_object1).delete()
+        self.wfmodule1.refresh_from_db()
+        self.assertIsNone(self.wfmodule1.retrieve_fetched_table())
 
     # test stored versions of data: create, retrieve, set, list, and views
     def test_wf_module_data_versions(self):
@@ -161,7 +178,8 @@ class WfModuleTests(WfModuleTestsBase):
         # duplicate into another workflow, as we would do when duplicating a workflow
         workflow2 = add_new_workflow("Test Workflow 2")
         InitWorkflowCommand.create(workflow2)
-        wfm1d = wfm1.duplicate(workflow2)
+        tab2 = workflow2.tabs.create(position=0)
+        wfm1d = wfm1.duplicate(tab2)
         wfm1d.refresh_from_db() # test what we actually have in the db
 
         self.assertEqual(wfm1d.workflow, workflow2)
@@ -175,7 +193,8 @@ class WfModuleTests(WfModuleTestsBase):
         self.assertEqual(wfm1d.stored_data_version, wfm1.stored_data_version)
 
         # parameters should be duplicated
-        self.assertEqual(ParameterVal.objects.filter(wf_module=wfm1d).count(), ParameterVal.objects.filter(wf_module=wfm1).count())
+        self.assertEqual(ParameterVal.objects.filter(wf_module=wfm1d).count(),
+                         ParameterVal.objects.filter(wf_module=wfm1).count())
 
         # Stored data should contain a clone of content only, not complete version history
         self.assertIsNotNone(wfm1d.stored_data_version)

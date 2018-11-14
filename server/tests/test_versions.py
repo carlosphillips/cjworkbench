@@ -8,12 +8,12 @@ from server.tests.utils import DbTestCase, load_and_add_module, mock_csv_table
 from server.versions import save_result_if_changed
 
 
-async def async_noop(*args, **kwargs):
-    pass
+future_none = asyncio.Future()
+future_none.set_result(None)
 
 
-@patch('server.models.Delta.schedule_execute', async_noop)
-@patch('server.models.Delta.ws_notify', async_noop)
+@patch('server.rabbitmq.queue_render', future_none)
+@patch('server.websockets.ws_client_send_delta_async', future_none)
 class VersionTests(DbTestCase):
     def setUp(self):
         self.wfm = load_and_add_module('loadurl')

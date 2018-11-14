@@ -1,17 +1,19 @@
 import asyncio
+from datetime import timedelta
 from functools import partial
 import logging
 import msgpack
+import os
 import time
 from typing import Awaitable, Callable
 import aio_pika
 import asyncpg
 from async_generator import asynccontextmanager  # TODO python 3.7 native
 from django.conf import settings
+from django.db import DatabaseError, InterfaceError
 from django.utils import timezone
-from server import execute
+from server import dispatch, execute, rabbitmq
 from server.models import UploadedFile, WfModule, Workflow
-from server.updates import update_wf_module
 from server.modules import uploadfile
 
 
@@ -26,18 +28,26 @@ logger = logging.getLogger(__name__)
 
 # NRenderers: number of renders to perform simultaneously. This should be 1 per
 # CPU, because rendering is CPU-bound. (It uses a fair amount of RAM, too.)
-NRenderers = 1
+#
+# Default is 1: we expect to run on a 2-CPU machine, so 1 CPU for render and 1
+# for cron-render.
+NRenderers = int(os.getenv('CJW_WORKER_N_RENDERERS', 1))
 
 # NFetchers: number of fetches to perform simultaneously. Fetching is
 # often I/O-heavy, and some of our dependencies use blocking calls, so we
 # allocate a thread per fetcher. Larger files may use lots of RAM.
-NFetchers = 3
+#
+# Default is 3: these mostly involve waiting for remote servers, though there's
+# also some RAM required for bigger tables.
+NFetchers = int(os.getenv('CJW_WORKER_N_FETCHERS', 3))
 
 # NUploaders: number of uploaded files to process at a time. TODO turn these
 # into fetches - https://www.pivotaltracker.com/story/show/161509317. We handle
 # the occasional 1GB+ file, which will consume ~3GB of RAM, so let's keep this
 # number at 1
-NUploaders = 1
+#
+# Default is 1: we don't expect many uploads.
+NUploaders = int(os.getenv('CJW_WORKER_N_UPLOADERS', 1))
 
 # DupRenderWait: number of seconds to wait before queueing a re-render request.
 # When a service requests a render of an already-rendering workflow, the
@@ -52,6 +62,9 @@ NUploaders = 1
 # on average). Either way, the duplicate-render Workflow will be queued _last_
 # so that other pending renders will occur before it.
 DupRenderWait = 0.05  # s
+
+
+MinFetchInterval = 5 * 60  # 5min
 
 
 class WorkflowAlreadyLocked(Exception):
@@ -80,7 +93,7 @@ class PgLocker:
 
     async def __aenter__(self) -> 'PgLocker':
         # pg_connection: asyncpg, not Django database, because we use its
-        # transaction asynchronously. (Async is so much easier than threading....)
+        # transaction asynchronously. (Async is so much easier than threading.)
         pg_config = settings.DATABASES['default']
         pg_connection = await asyncpg.connect(
             host=pg_config['HOST'],
@@ -138,12 +151,12 @@ class PgLocker:
         transaction and hold it for the duration of the render. Raise
         WorkflowAlreadyLocked if we cannot acquire the lock immediately.
 
-        pg_advisory_lock() takes two int parameters (to make a 64-bit int). We'll
-        give 0 as the first int (let's call 0 "category of lock") and the workflow
+        pg_advisory_lock() takes two int parameters (to make a 64-bit int).
+        Give 0 as the first int (let's call 0 "category of lock") and workflow
         ID as the second int. (Workflow IDs are 32-bit.) We use
-        pg_try_advisory_xact_lock(0, workflow_id): `try` is non-blocking and `xact`
-        means the lock will be released as soon as the transaction completes -- for
-        instance, if a worker exits unexpectedly.
+        pg_try_advisory_xact_lock(0, workflow_id): `try` is non-blocking and
+        `xact` means the lock will be released as soon as the transaction ends
+        -- for instance, if a worker exits unexpectedly.
         """
         async with self.lock:
             async with self.pg_connection.transaction():
@@ -157,7 +170,8 @@ class PgLocker:
                     raise WorkflowAlreadyLocked
 
 
-async def send_render(send_channel, send_lock, workflow_id: int) -> None:
+async def send_render(send_channel, send_lock, workflow_id: int,
+                      delta_id: int) -> None:
     # We use asyncio.sleep() to avoid spinning. It would be nice to use a
     # RabbitMQ delayed exchange instead; that would involve a custom RabbitMQ
     # image, and as of 2018-10-30 the cost (new Docker image) seems to outweigh
@@ -166,7 +180,10 @@ async def send_render(send_channel, send_lock, workflow_id: int) -> None:
 
     async with send_lock:
         await send_channel.default_exchange.publish(
-            aio_pika.Message(msgpack.packb({'workflow_id': workflow_id})),
+            aio_pika.Message(msgpack.packb({
+                'workflow_id': workflow_id,
+                'delta_id': delta_id,
+            })),
             routing_key='render'
         )
 
@@ -181,9 +198,34 @@ async def benchmark(task, message, *args):
         logger.info(f'End {message} (%dms)', *args, 1000 * (t2 - t1))
 
 
+async def update_wf_module(wf_module, now):
+    """Fetch `wf_module` and notify user of changes via email/websockets."""
+    logger.debug('update_wf_module(%d, %d) at interval %d',
+                 wf_module.workflow_id, wf_module.id,
+                 wf_module.update_interval)
+    try:
+        await dispatch.module_dispatch_fetch(wf_module)
+    except Exception as e:
+        # Log exceptions but keep going
+        logger.exception(f'Error fetching {wf_module}')
+
+    update_next_update_time(wf_module, now)
+
+
+def update_next_update_time(wf_module, now):
+    """Schedule next update, skipping missed updates if any."""
+    tick = timedelta(seconds=max(wf_module.update_interval, MinFetchInterval))
+    wf_module.last_update_check = now
+
+    if wf_module.next_update:
+        while wf_module.next_update <= now:
+            wf_module.next_update += tick
+    wf_module.save(update_fields=['last_update_check', 'next_update'])
+
+
 async def render_or_reschedule(lock_render: Callable[[int], Awaitable[None]],
                                reschedule: Callable[[int], Awaitable[None]],
-                               workflow_id: int) -> None:
+                               workflow_id: int, delta_id: int) -> None:
     """
     Acquire an advisory lock and render, or re-queue task if the lock is held.
 
@@ -192,25 +234,37 @@ async def render_or_reschedule(lock_render: Callable[[int], Awaitable[None]],
     first render to exit (which will happen at the next stale database-write)
     before trying again.
     """
+    # Query for workflow before locking. We don't need a lock for this, and no
+    # lock means we can dismiss spurious renders sooner, so they don't fill the
+    # render queue.
+    try:
+        workflow = Workflow.objects.get(id=workflow_id)
+    except Workflow.DoesNotExist:
+        logger.info('Skipping render of deleted Workflow %d', workflow_id)
+        return
+    if workflow.last_delta_id != delta_id:
+        logger.info('Ignoring stale render request %d for Workflow %d',
+                    delta_id, workflow_id)
+        return
+
     try:
         async with lock_render(workflow_id):
-            workflow = Workflow.objects.get(id=workflow_id)
-
             # Most exceptions caught elsewhere.
             #
             # execute_workflow() will raise UnneededExecution if the workflow
             # changes while it's being rendered.
+            #
+            # We don't use `workflow.cooperative_lock()` because `execute` may
+            # take ages (and it locks internally when it needs to).
+            # `execute_workflow()` _anticipates_ that `workflow` data may be
+            # stale.
             task = execute.execute_workflow(workflow)
             await benchmark(task, 'execute_workflow(%d)', workflow_id)
 
     except WorkflowAlreadyLocked:
         logger.info('Workflow %d is being rendered elsewhere; rescheduling',
                     workflow_id)
-        await reschedule(workflow_id)
-
-    except Workflow.DoesNotExist:
-        logger.info('Skipping render of deleted Workflow %d', workflow_id)
-        return
+        await reschedule(workflow_id, delta_id)
 
     except execute.UnneededExecution:
         logger.info('UnneededExecution in execute_workflow(%d)',
@@ -219,6 +273,34 @@ async def render_or_reschedule(lock_render: Callable[[int], Awaitable[None]],
         # Workflow has also scheduled a render. Indeed, that new render
         # request may already have hit WorkflowAlreadyLocked.
         return
+
+    except DatabaseError:
+        # Two possibilities:
+        #
+        # 1. There's a bug in server.execute. This may leave the event
+        # loop's executor thread's database connection in an inconsistent
+        # state. [2018-11-06 saw this on production.] The best way to clear
+        # up the leaked, broken connection is to die. (Our parent process
+        # should restart us, and RabbitMQ will give the job to someone
+        # else.)
+        #
+        # 2. The database connection died (e.g., Postgres went away.) The
+        # best way to clear up the leaked, broken connection is to die.
+        # (Our parent process should restart us, and RabbitMQ will give the
+        # job to someone else.)
+        #
+        # 3. There's some design flaw we haven't thought of, and we
+        # shouldn't ever render this workflow. If this is the case, we're
+        # doomed.
+        #
+        # If you're seeing this error that means there's a bug somewhere
+        # _else_. If you're staring at a case-3 situation, please remember
+        # that cases 1 and 2 are important, too.
+        logger.exception('Fatal database error; exiting')
+        os._exit(1)
+    except InterfaceError:
+        logger.exception('Fatal database error; exiting')
+        os._exit(1)
 
 
 async def fetch(*, wf_module_id: int) -> None:
@@ -229,9 +311,37 @@ async def fetch(*, wf_module_id: int) -> None:
         return
 
     now = timezone.now()
-    # exceptions caught elsewhere
-    task = update_wf_module(wf_module, now)
-    await benchmark(task, 'update_wf_module(%d)', wf_module_id)
+    # most exceptions caught elsewhere
+    try:
+        task = update_wf_module(wf_module, now)
+        await benchmark(task, 'update_wf_module(%d)', wf_module_id)
+    except DatabaseError:
+        # Two possibilities:
+        #
+        # 1. There's a bug in module_dispatch_fetch. This may leave the event
+        # loop's executor thread's database connection in an inconsistent
+        # state. [2018-11-06 saw this on production.] The best way to clear
+        # up the leaked, broken connection is to die. (Our parent process
+        # should restart us, and RabbitMQ will give the job to someone
+        # else.)
+        #
+        # 2. The database connection died (e.g., Postgres went away.) The
+        # best way to clear up the leaked, broken connection is to die.
+        # (Our parent process should restart us, and RabbitMQ will give the
+        # job to someone else.)
+        #
+        # 3. There's some design flaw we haven't thought of, and we
+        # shouldn't ever render this workflow. If this is the case, we're
+        # doomed.
+        #
+        # If you're seeing this error that means there's a bug somewhere
+        # _else_. If you're staring at a case-3 situation, please remember
+        # that cases 1 and 2 are important, too.
+        logger.exception('Fatal database error; exiting')
+        os._exit(1)
+    except InterfaceError:
+        logger.exception('Fatal database error; exiting')
+        os._exit(1)
 
 
 async def upload_DELETEME(*, wf_module_id: int, uploaded_file_id: int) -> None:
@@ -262,9 +372,23 @@ async def handle_render(lock_render: Callable[[int], Awaitable[None]],
                         reschedule: Callable[[int], Awaitable[None]],
                         message: aio_pika.IncomingMessage) -> None:
     with message.process():
-        kwargs = msgpack.unpackb(message.body, raw=False)
+        body = msgpack.unpackb(message.body, raw=False)
         try:
-            await render_or_reschedule(lock_render, reschedule, **kwargs)
+            workflow_id = int(body['workflow_id'])
+            delta_id = int(body['delta_id'])
+        except:
+            logger.info(
+                ('Ignoring invalid render request. '
+                 'Expected {workflow_id:int, delta_id:int}; got %r'),
+                body
+            )
+            return
+
+        try:
+            task = render_or_reschedule(lock_render, reschedule, workflow_id,
+                                        delta_id)
+            await benchmark(task, 'render_or_reschedule(%d, %d)',
+                            workflow_id, delta_id)
         except:
             logger.exception('Error during render')
 
@@ -341,18 +465,17 @@ async def DELETEME_listen_for_uploads(connection: aio_pika.Connection,
 
 async def main_loop():
     """
-    Run one fetcher and one renderer, forever.
+    Run fetchers and renderers, forever.
     """
-    host = settings.RABBITMQ_HOST
-
-    logger.info('Connecting to %s', host)
-    connection = await aio_pika.connect_robust(url=host,
-                                               connection_attempts=100)
+    connection = (await rabbitmq.get_connection()).connection
     async with PgLocker() as pg_locker:
-        await listen_for_renders(pg_locker, connection, NRenderers)
-        await listen_for_fetches(connection, NFetchers)
-        await DELETEME_listen_for_uploads(connection, NUploaders)
+        if NRenderers:
+            await listen_for_renders(pg_locker, connection, NRenderers)
+        if NFetchers:
+            await listen_for_fetches(connection, NFetchers)
+        if NUploaders:
+            await DELETEME_listen_for_uploads(connection, NUploaders)
 
         # Run forever
         while True:
-            await asyncio.sleep(1)
+            await asyncio.sleep(99999)

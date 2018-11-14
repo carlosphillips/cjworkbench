@@ -2,7 +2,6 @@
 # A single change to state of a workflow
 # You can also think of this as a "command." Contains a specification of what
 # actually happened.
-import asyncio
 import json
 from typing import Any
 from channels.db import database_sync_to_async
@@ -139,7 +138,9 @@ class Delta(PolymorphicModel):
         return data
 
     async def schedule_execute(self) -> None:
-        await rabbitmq.queue_render(self.workflow)
+        """Tell renderers to render the new workflow."""
+        await rabbitmq.queue_render(self.workflow.id,
+                                    self.workflow.last_delta_id)
 
     @classmethod
     async def create(cls, *, workflow, **kwargs):
@@ -163,7 +164,7 @@ class Delta(PolymorphicModel):
 
         Example:
 
-            delta = await Delta.create_impl(
+            delta = await ChangeWfModuleNotesCommand.create_impl(
                 workflow=wf_module.workflow,
                 # ... other kwargs
             )
